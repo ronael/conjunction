@@ -24,8 +24,15 @@ for the current architecture and what is deliberately not built yet.
   from `src/core/`.
 - `src/core/` talks to workspace/verification only through the ports in
   `src/core/orchestrator.ts` (`WorkspaceProvider`, `VerificationRunner`) and the
-  `VerificationOutcome` type.
-- Tests mirror `src/` under `tests/`.
+  `VerificationOutcome` type. Agent runtimes plug in through the `AgentAdapter`
+  port in `src/core/agent.ts`; core never imports a concrete adapter.
+- `src/adapters/<runtime>/` (e.g. `codex/`) are leaf modules that implement
+  `AgentAdapter`. They may import core types; only `src/cli/` wires them in.
+  Adapters report process outcome only — never pass/fail judgments.
+- `src/cli/` is the composition root: it wires core + workspace + verification +
+  the adapter and owns run persistence (`.conjunction/runs/*.json` + JSONL events).
+- Tests mirror `src/` under `tests/`. Unit tests for adapters must fake the
+  process spawner — never invoke a real agent runtime in vitest.
 
 ## Git safety
 
@@ -49,6 +56,12 @@ pnpm build        # tsc -p tsconfig.build.json
 ```
 
 `pnpm format` fixes formatting/lint autofixes.
+
+## CLI
+
+The `conjunction` bin builds to `dist/cli/main.js` (`node dist/cli/main.js --help`;
+see `docs/usage.md`). When changing CLI flags or behavior, keep `docs/usage.md`
+in sync.
 
 ## Documentation
 

@@ -86,18 +86,58 @@ strict dependency direction enforced by convention:
 
 ## Not implemented yet (explicit)
 
-- Agent adapters / any AI or provider invocation (Lot 4).
-- CLI (Lot 5), correction feedback loop (Lot 6), independent reviewer (Lot 7).
+- Correction feedback loop (Lot 6), independent reviewer (Lot 7).
 - Multi-agent orchestration, planner, scheduler, message bus.
-- Persistence: runs/events are in-memory only; nothing is written to `.conjunction/`
-  except worktrees.
+- Additional agent adapters (claude-code, opencode, …); only codex exists.
 - Configuration file (`conjunction.toml` or similar) — verification commands are
-  passed in code for now.
+  CLI flags for now.
 - `.conjunction/` is not auto-added to the host repo's exclude file; in user repos it
-  will show as untracked until that is handled (Lot 5 concern).
+  will show as untracked until that is handled.
+- Durable/resumable state: run metadata is persisted as JSON/JSONL, but an
+  interrupted CLI process cannot resume a run.
 - UI of any kind.
 
-## Recommended Lot 4 adapter contract (sketch — NOT implemented)
+## Lot 4/5 as implemented (supersedes the sketch below)
+
+The Lot 4 contract landed as sketched, with three refinements reality required:
+
+- `AgentRunResult.aborted: boolean` — distinguishes AbortSignal cancellation
+  (→ `run.cancelled`) from timeout (→ `run.failed`) and process failure.
+- `AgentRunResult.lastMessage?: string` — codex exposes the final agent message via
+  `-o/--output-last-message`; the orchestrator stores it as `run.result.summary`.
+- `Orchestrator.executeRun(runId, { timeoutMs, signal?, onOutput? })` — the seam the
+  sketch predicted (`startRun` → adapter → `verifyRun`). Outcome mapping: exit 0 keeps
+  the run `running` (verification decides); non-zero/null exit or timeout fails it;
+  abort cancels it. Emits `agent.started` / `agent.output` / `agent.completed`.
+
+The codex adapter (`src/adapters/codex/`, leaf module — core never imports it) invokes:
+
+```
+codex exec -C <worktree> -s workspace-write --ephemeral --color never \
+  -o <tmpfile> [-m <model>] -- <prompt>
+```
+
+- Sandbox is hardcoded to `workspace-write` (not a constructor option); the dangerous
+  modes are never emitted.
+- The process spawner is an injected seam (`ProcessSpawner`); unit tests fake it and
+  never touch the real codex binary.
+- Timeout/abort kills the whole process group (spawn `detached`, signal `-pid`),
+  escalating SIGTERM → SIGKILL after a grace period, because codex spawns
+  subprocesses.
+- The prompt is built deterministically from the Task (objective, constraints,
+  acceptance criteria, plus explicit "isolated worktree / no git commands / stay in
+  the worktree" rules).
+
+Lot 5 added `src/cli/` (`conjunction` bin): `run`, `status`, `doctor`, hand-rolled
+arg parsing. Run metadata is persisted as `.conjunction/runs/<runId>.json` (rewritten
+at each state change) plus `<runId>.events.jsonl` (appended) — the "optionally
+serialize run metadata/events to `.conjunction/`" the architecture doc allows, no
+database. Verified end-to-end against real codex-cli 0.144.1: a smoke task
+("create hello.txt containing hello conjunction") completed in a temp repo — branch
+`conjunction/<runId>` created, file written inside the worktree only, metadata and
+events persisted, summary printed, user's branch untouched.
+
+## Original Lot 4 contract sketch (historical)
 
 Informed by Lots 1–3: the orchestrator already has the seam (`startRun` → _adapter
 goes here_ → `verifyRun`), runs carry `runtime` as a free-form string, and the event
