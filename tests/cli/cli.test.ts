@@ -1,0 +1,232 @@
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import type { AgentAdapter, AgentRunInput, AgentRunResult } from "../../src/core/index.js";
+import { cli } from "../../src/cli/cli.js";
+import { execGit } from "../../src/workspace/index.js";
+
+const tempDirs: string[] = [];
+
+async function makeTempRepo(): Promise<string> {
+  const repo = await realpath(await mkdtemp(path.join(tmpdir(), "conjunction-cli-test-")));
+  tempDirs.push(repo);
+  await execGit(["init", "-b", "main"], { cwd: repo });
+  await execGit(["config", "user.email", "test@conjunction.dev"], { cwd: repo });
+  await execGit(["config", "user.name", "Conjunction Test"], { cwd: repo });
+  await writeFile(path.join(repo, "README.md"), "# test repo\n");
+  await execGit(["add", "README.md"], { cwd: repo });
+  await execGit(["commit", "-m", "initial commit"], { cwd: repo });
+  return repo;
+}
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+interface StubBehavior {
+  (input: AgentRunInput): Promise<Partial<AgentRunResult>>;
+}
+
+function stubAdapter(behavior: StubBehavior): AgentAdapter {
+  return {
+    id: "stub-agent",
+    detect: () => Promise.resolve({ available: true, version: "stub 1.0" }),
+    run: async (input) => ({
+      exitCode: 0,
+      timedOut: false,
+      aborted: false,
+      ...(await behavior(input)),
+    }),
+  };
+}
+
+/** Stub that acts like a real agent: creates hello.txt inside the worktree. */
+const fileCreatingStub = stubAdapter(async (input) => {
+  input.onOutput?.("stub: creating hello.txt\n", "stdout");
+  await writeFile(path.join(input.workspacePath, "hello.txt"), "hello conjunction\n");
+  return { lastMessage: "created hello.txt" };
+});
+
+function capture(): { out: (chunk: string) => void; text: () => string } {
+  let buffer = "";
+  return { out: (chunk) => (buffer += chunk), text: () => buffer };
+}
+
+async function storedRunIds(repo: string): Promise<string[]> {
+  const dir = path.join(repo, ".conjunction", "runs");
+  const files = await readdir(dir);
+  return files.filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
+}
+
+describe("cli run (stub adapter, real git repo)", () => {
+  it("runs the full slice: worktree -> agent -> verification -> completed", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+
+    const code = await cli(
+      ["run", "create hello.txt", "--repo", repo, "--verify", "test -f hello.txt"],
+      { adapter: fileCreatingStub, out: io.out },
+    );
+
+    expect(code).toBe(0);
+    const [runId] = await storedRunIds(repo);
+    expect(runId).toBeDefined();
+
+    // worktree preserved with the agent's change inside
+    const worktree = path.join(repo, ".conjunction", "worktrees", runId ?? "");
+    expect(await readFile(path.join(worktree, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+
+    // branch created
+    const { stdout: branches } = await execGit(["branch", "--list"], { cwd: repo });
+    expect(branches).toContain(`conjunction/${runId}`);
+
+    // metadata + events persisted
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string; branch: string }; task: { objective: string } };
+    expect(stored.run.state).toBe("completed");
+    expect(stored.run.branch).toBe(`conjunction/${runId}`);
+    expect(stored.task.objective).toBe("create hello.txt");
+
+    const events = await readFile(
+      path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+      "utf8",
+    );
+    const eventTypes = events
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(eventTypes).toEqual([
+      "task.created",
+      "run.started",
+      "workspace.created",
+      "agent.started",
+      "agent.output",
+      "agent.completed",
+      "verification.started",
+      "verification.passed",
+      "run.completed",
+    ]);
+
+    // summary mentions the key facts
+    const text = io.text();
+    expect(text).toContain("state:    completed");
+    expect(text).toContain(`conjunction/${runId}`);
+    expect(text).toContain("test -f hello.txt: exit 0");
+    expect(text).toContain("created hello.txt");
+  });
+
+  it("fails (exit 1) when verification fails, run state recorded as failed", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--verify", "false"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(1);
+    expect(io.text()).toContain("verify:   FAILED");
+    expect(io.text()).toContain("state:    failed");
+  });
+
+  it("fails (exit 1) when the agent exits non-zero", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const failingStub = stubAdapter(() => Promise.resolve({ exitCode: 2 }));
+    const code = await cli(["run", "do something", "--repo", repo], {
+      adapter: failingStub,
+      out: io.out,
+    });
+    expect(code).toBe(1);
+    expect(io.text()).toContain("agent exited with code 2");
+  });
+
+  it("completes without verification commands (vacuous pass)", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("vacuous pass");
+  });
+
+  it("--cleanup refuses to remove the dirty worktree and preserves it", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--cleanup"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("cleanup:  refused");
+    const [runId] = await storedRunIds(repo);
+    const worktree = path.join(repo, ".conjunction", "worktrees", runId ?? "");
+    expect(await readFile(path.join(worktree, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+
+  it("rejects a non-git directory with exit 2", async () => {
+    const dir = await realpath(await mkdtemp(path.join(tmpdir(), "conjunction-cli-plain-")));
+    tempDirs.push(dir);
+    const io = capture();
+    const code = await cli(["run", "anything", "--repo", dir], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(2);
+    expect(io.text()).toContain("not a git repository");
+  });
+});
+
+describe("cli status / doctor / usage", () => {
+  it("status lists recorded runs", async () => {
+    const repo = await makeTempRepo();
+    const runIo = capture();
+    await cli(["run", "create hello.txt", "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: runIo.out,
+    });
+
+    const io = capture();
+    const code = await cli(["status", "--repo", repo], { out: io.out });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("completed");
+    expect(io.text()).toContain("stub-agent");
+    expect(io.text()).toContain("create hello.txt");
+  });
+
+  it("status on a repo without runs prints a friendly message", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    expect(await cli(["status", "--repo", repo], { out: io.out })).toBe(0);
+    expect(io.text()).toContain("no runs found");
+  });
+
+  it("doctor reports adapter availability", async () => {
+    const io = capture();
+    expect(await cli(["doctor"], { adapter: fileCreatingStub, out: io.out })).toBe(0);
+    expect(io.text()).toContain("available");
+
+    const down: AgentAdapter = {
+      id: "stub-agent",
+      detect: () => Promise.resolve({ available: false, reason: "not installed" }),
+      run: () => Promise.reject(new Error("should not run")),
+    };
+    const io2 = capture();
+    expect(await cli(["doctor"], { adapter: down, out: io2.out })).toBe(1);
+    expect(io2.text()).toContain("NOT available");
+  });
+
+  it("prints usage and exit 2 for unknown commands and missing description", async () => {
+    const io = capture();
+    expect(await cli(["frobnicate"], { out: io.out })).toBe(2);
+    expect(io.text()).toContain("unknown command");
+
+    const io2 = capture();
+    expect(await cli(["run"], { out: io2.out })).toBe(2);
+    expect(io2.text()).toContain("requires a task description");
+  });
+});
