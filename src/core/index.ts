@@ -7,6 +7,12 @@ export {
   type TaskStatus,
 } from "./task.js";
 export {
+  type AgentAdapter,
+  type AgentAvailability,
+  type AgentRunInput,
+  type AgentRunResult,
+} from "./agent.js";
+export {
   assertTransition,
   canTransition,
   InvalidRunStateTransitionError,
@@ -36,8 +42,10 @@ export {
 export {
   MissingDependencyError,
   Orchestrator,
+  RunNotExecutableError,
   RunNotFoundError,
   TaskNotFoundError,
+  type ExecuteRunOptions,
   type OrchestratorDeps,
   type VerificationRunner,
   type WorkspaceHandle,

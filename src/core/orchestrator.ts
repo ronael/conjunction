@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { AgentAdapter } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
 import { transitionRun, type Run, type VerificationOutcome } from "./run.js";
 import { createTask, type Task, type TaskInput } from "./task.js";
@@ -22,6 +23,7 @@ export interface VerificationRunner {
 export interface OrchestratorDeps {
   workspace?: WorkspaceProvider;
   verification?: VerificationRunner;
+  agent?: AgentAdapter;
   createId?: () => string;
   now?: () => Date;
 }
@@ -47,6 +49,21 @@ export class MissingDependencyError extends Error {
   }
 }
 
+/** The run is not in a state/shape that allows executing an agent on it. */
+export class RunNotExecutableError extends Error {
+  constructor(reason: string) {
+    super(`run is not executable: ${reason}`);
+    this.name = "RunNotExecutableError";
+  }
+}
+
+export interface ExecuteRunOptions {
+  timeoutMs: number;
+  signal?: AbortSignal;
+  /** Forwarded agent output, after it has been recorded as agent.output events. */
+  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
+}
+
 type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
   ? Omit<E, "id" | "timestamp">
   : never;
@@ -55,9 +72,9 @@ type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
  * Drives the task/run lifecycle: creates tasks and runs, advances the run
  * state machine, and appends every state change to the event store.
  *
- * Deliberately NOT here: agent runtime invocation (lot 4 plugs an
- * AgentAdapter between startRun and verifyRun), persistence, scheduling,
- * or any multi-agent coordination.
+ * Deliberately NOT here: persistence, scheduling, or any multi-agent
+ * coordination. The agent itself is injected as an AgentAdapter port; core
+ * never imports a concrete runtime.
  */
 export class Orchestrator {
   readonly events = new EventStore();
@@ -131,8 +148,78 @@ export class Orchestrator {
   }
 
   /**
-   * running|verifying -> failed. Used for agent-level failures (lot 4) and
-   * unexpected errors; verification failures go through verifyRun instead.
+   * Executes the injected AgentAdapter for a running run. The run must be in
+   * state "running" (call startRun first) and must have a workspace — agents
+   * only ever execute inside an isolated worktree.
+   *
+   * Outcome mapping: success keeps the run "running" (verification decides
+   * pass/fail); timeout or non-zero exit fails the run; abort cancels it.
+   */
+  async executeRun(runId: string, options: ExecuteRunOptions): Promise<Run> {
+    const run = this.#requireRun(runId);
+    const task = this.#requireTask(run.taskId);
+    if (!this.deps.agent) {
+      throw new MissingDependencyError("agent");
+    }
+    if (run.state !== "running") {
+      throw new RunNotExecutableError(`state must be "running", got "${run.state}"`);
+    }
+    if (run.workspacePath === undefined) {
+      throw new RunNotExecutableError(
+        "run has no workspace (startRun without a workspace provider)",
+      );
+    }
+
+    this.#emit({
+      type: "agent.started",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: { runtime: run.runtime },
+    });
+
+    const input: Parameters<AgentAdapter["run"]>[0] = {
+      task,
+      workspacePath: run.workspacePath,
+      timeoutMs: options.timeoutMs,
+      onOutput: (chunk, stream) => {
+        this.#emit({
+          type: "agent.output",
+          taskId: run.taskId,
+          runId: run.id,
+          payload: { stream, chunk },
+        });
+        options.onOutput?.(chunk, stream);
+      },
+    };
+    if (options.signal !== undefined) {
+      input.signal = options.signal;
+    }
+
+    const result = await this.deps.agent.run(input);
+
+    this.#emit({
+      type: "agent.completed",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: { exitCode: result.exitCode },
+    });
+    if (result.lastMessage !== undefined) {
+      run.result = { summary: result.lastMessage };
+    }
+
+    if (result.aborted) {
+      this.cancelRun(run.id, "agent execution aborted");
+    } else if (result.timedOut) {
+      this.failRun(run.id, `agent timed out after ${options.timeoutMs}ms`);
+    } else if (result.exitCode !== 0) {
+      this.failRun(run.id, `agent exited with code ${result.exitCode ?? "null (killed)"}`);
+    }
+    return run;
+  }
+
+  /**
+   * running|verifying -> failed. Used for agent-level failures and unexpected
+   * errors; verification failures go through verifyRun instead.
    */
   failRun(runId: string, error: string): Run {
     const run = this.#requireRun(runId);
