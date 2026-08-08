@@ -33,6 +33,10 @@ export interface RunVerificationOptions {
   failFast?: boolean;
   /** Default per-command timeout. Default: 5 minutes. */
   timeoutMs?: number;
+  /** Progress seam for UIs: fired right before a command starts. */
+  onCommandStart?: (command: VerificationCommand) => void;
+  /** Progress seam for UIs: fired after a command finishes (any outcome). */
+  onCommandEnd?: (command: VerificationCommand, result: CommandResult) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -68,7 +72,9 @@ export async function runVerification(
   const results: CommandResult[] = [];
 
   for (const command of commands) {
+    options.onCommandStart?.(command);
     const result = await runCommand(command, options);
+    options.onCommandEnd?.(command, result);
     results.push(result);
     if (failFast && !isSuccess(result)) {
       break;

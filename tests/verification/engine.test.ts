@@ -98,4 +98,17 @@ describe("runVerification", () => {
     expect(result.passed).toBe(true);
     expect(result.results).toEqual([]);
   });
+
+  it("fires onCommandStart/onCommandEnd around each executed command", async () => {
+    const calls: string[] = [];
+    const result = await runVerification([ok, fail, { ...ok, name: "never-runs" }], {
+      cwd: CWD,
+      onCommandStart: (command) => calls.push(`start:${command.name}`),
+      onCommandEnd: (command, commandResult) =>
+        calls.push(`end:${command.name}:${commandResult.exitCode ?? "null"}`),
+    });
+    expect(result.passed).toBe(false);
+    // fail-fast: the third command never starts
+    expect(calls).toEqual(["start:ok", "end:ok:0", "start:fail", "end:fail:1"]);
+  });
 });

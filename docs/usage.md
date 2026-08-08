@@ -52,6 +52,37 @@ Options:
 - `--model <model>` — passed through as `codex exec -m <model>`.
 - `--cleanup` — attempt to remove the worktree+branch after the run. Removal
   is refused (and the worktree preserved) when it has uncommitted changes.
+- `--plain` — force plain text output (no TUI), same as piping/CI behavior.
+
+## Interactive TUI
+
+When stdout is a terminal, `run` renders an Ink-based TUI instead of plain
+text (pipes, CI and `--plain` get the plain output):
+
+```
+┌ Conjunction ─ run a1b2c3d4 ─ task: "add a dark-mode toggle"
+│ state: RUNNING (agent)   elapsed 01:23   branch conjunction/a1b2c3d4
+├ Agent output (autoscroll)
+│ …streamed agent stdout; stderr dimmed…
+├ Verification
+│ ● typecheck  ✓ 1.2s
+│ ● test        ⠋ running
+└ q / Ctrl-C: cancel run · ↑/↓: scroll
+```
+
+- Header: short run id, truncated task title, phase, elapsed time, branch.
+- Agent output: streamed, auto-following; ↑/↓ (or PageUp/PageDown) scrolls —
+  scrolling up pauses follow, scrolling back to the end resumes it. Output is
+  capped at a 2,000-line ring buffer (dropped lines are counted in the pane
+  header).
+- Verification: per-command spinner → ✓ (duration) / ✗ (exit code), with the
+  tail of stderr shown for failures.
+- Final panel: COMPLETED / FAILED / CANCELLED with worktree, branch,
+  verification recap, cleanup outcome and the metadata path.
+
+Keys: `q` or `Ctrl-C` cancels the run gracefully while running (the agent
+process group is killed via the AbortSignal path; a second Ctrl-C in plain
+mode force-exits), `q` / `enter` dismisses the final panel.
 
 Exit codes: `0` = run completed (agent exited cleanly and verification passed,
 or no `--verify` was given); `1` = run failed/cancelled; `2` = usage or setup

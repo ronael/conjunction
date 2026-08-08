@@ -2,7 +2,11 @@ import path from "node:path";
 
 import type { AgentAdapter, Run, Task } from "../core/index.js";
 import { Orchestrator } from "../core/index.js";
-import type { VerificationCommand, VerificationResult } from "../verification/index.js";
+import type {
+  CommandResult,
+  VerificationCommand,
+  VerificationResult,
+} from "../verification/index.js";
 import { runVerification } from "../verification/index.js";
 import {
   createRunWorkspace,
@@ -22,19 +26,48 @@ export interface RunTaskOptions {
   cleanup: boolean;
 }
 
+/**
+ * Fine-grained progress hooks for live UIs. All optional; the plain CLI
+ * output path does not use them. The TUI implements this to feed its model —
+ * the engine itself never knows a UI exists.
+ */
+export interface RunObserver {
+  /** Once, right after the workspace exists. */
+  context?(ctx: { run: Run; task: Task; repoRoot: string; storeDir: string }): void;
+  agentOutput?(chunk: string, stream: "stdout" | "stderr"): void;
+  verificationStarted?(): void;
+  commandStarted?(command: VerificationCommand): void;
+  commandFinished?(command: VerificationCommand, result: CommandResult): void;
+}
+
 export interface RunTaskDeps {
   adapter: AgentAdapter;
   out: (chunk: string) => void;
+  observer?: RunObserver;
+  /** Cancellation (q / Ctrl-C): forwarded to Orchestrator.executeRun. */
+  signal?: AbortSignal;
+}
+
+export interface RunTaskResult {
+  exitCode: number;
+  repoRoot: string;
+  storeDir: string;
+  /** Absent only when setup failed before a run could be created (exitCode 2). */
+  run?: Run;
+  task?: Task;
+  verification?: VerificationResult;
+  /** Human-readable outcome of the cleanup attempt, when requested. */
+  cleanupNote?: string;
 }
 
 /**
  * The Lot 5 vertical slice:
  * task -> worktree -> agent -> verification -> summary, with run metadata and
- * events persisted under `.conjunction/runs/`. Returns the process exit code:
- * 0 when the run completed (agent clean + verification passed/vacuous).
+ * events persisted under `.conjunction/runs/`. The result's exitCode is 0 when
+ * the run completed (agent clean + verification passed/vacuous).
  */
-export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promise<number> {
-  const { out, adapter } = deps;
+export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promise<RunTaskResult> {
+  const { out, adapter, observer } = deps;
 
   const availability = await adapter.detect();
   if (!availability.available) {
@@ -42,7 +75,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       `error: agent runtime "${adapter.id}" is not available: ` +
         `${availability.reason ?? "unknown reason"}\n`,
     );
-    return 2;
+    return { exitCode: 2, repoRoot: "", storeDir: "" };
   }
 
   let repoRoot: string;
@@ -50,7 +83,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     repoRoot = await findRepoRoot(options.repoPath);
   } catch {
     out(`error: not a git repository: ${options.repoPath}\n`);
-    return 2;
+    return { exitCode: 2, repoRoot: "", storeDir: "" };
   }
 
   let lastVerification: VerificationResult | undefined;
@@ -68,6 +101,8 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         }
         lastVerification = await runVerification(options.verifyCommands, {
           cwd: run.workspacePath,
+          onCommandStart: (command) => observer?.commandStarted?.(command),
+          onCommandEnd: (command, result) => observer?.commandFinished?.(command, result),
         });
         return lastVerification;
       },
@@ -96,16 +131,25 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     await orchestrator.startRun(run.id);
     await flush(task, run);
     out(`branch: ${run.branch ?? "-"}\nworktree: ${run.workspacePath ?? "-"}\n`);
+    observer?.context?.({ run, task, repoRoot, storeDir: store.dir });
     out("\n--- agent output ---\n");
 
-    await orchestrator.executeRun(run.id, {
+    const executeOptions: Parameters<Orchestrator["executeRun"]>[1] = {
       timeoutMs: options.timeoutMinutes * 60_000,
-      onOutput: (chunk) => out(chunk),
-    });
+      onOutput: (chunk, stream) => {
+        observer?.agentOutput?.(chunk, stream);
+        out(chunk);
+      },
+    };
+    if (deps.signal !== undefined) {
+      executeOptions.signal = deps.signal;
+    }
+    await orchestrator.executeRun(run.id, executeOptions);
     await flush(task, run);
 
     if (run.state === "running") {
       out("\n--- verification ---\n");
+      observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
       await orchestrator.verifyRun(run.id);
       await flush(task, run);
@@ -142,25 +186,39 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       }
     }
   }
-  out(`metadata: ${path.join(store.dir, `${run.id}.json`)} (+ .events.jsonl)\n`);
+  const metadataPath = path.join(store.dir, `${run.id}.json`);
+  out(`metadata: ${metadataPath} (+ .events.jsonl)\n`);
 
+  let cleanupNote: string | undefined;
   if (options.cleanup && run.workspacePath !== undefined) {
     try {
       await removeRunWorkspace(repoRoot, run.id);
-      out("cleanup:  worktree and branch removed\n");
+      cleanupNote = "cleanup:  worktree and branch removed\n";
     } catch (error) {
       if (error instanceof DirtyWorktreeError) {
-        out(
+        cleanupNote =
           "cleanup:  refused — worktree has uncommitted changes; " +
-            `preserved at ${run.workspacePath}\n`,
-        );
+          `preserved at ${run.workspacePath}\n`;
       } else {
-        out(`cleanup:  failed — ${(error as Error).message}\n`);
+        cleanupNote = `cleanup:  failed — ${(error as Error).message}\n`;
       }
     }
   } else {
-    out("cleanup:  worktree preserved for inspection (use --cleanup to attempt removal)\n");
+    cleanupNote =
+      "cleanup:  worktree preserved for inspection (use --cleanup to attempt removal)\n";
   }
+  out(cleanupNote);
 
-  return run.state === "completed" ? 0 : 1;
+  const result: RunTaskResult = {
+    exitCode: run.state === "completed" ? 0 : 1,
+    run,
+    task,
+    repoRoot,
+    storeDir: store.dir,
+    cleanupNote,
+  };
+  if (lastVerification !== undefined) {
+    result.verification = lastVerification;
+  }
+  return result;
 }

@@ -137,6 +137,36 @@ database. Verified end-to-end against real codex-cli 0.144.1: a smoke task
 `conjunction/<runId>` created, file written inside the worktree only, metadata and
 events persisted, summary printed, user's branch untouched.
 
+## TUI (Ink) — dependency decision
+
+`conjunction run` renders an interactive TUI when stdout is a TTY (plain text
+otherwise, plus a `--plain` escape hatch). New dependencies: `ink` + `react`
+(runtime), `ink-testing-library` + `@types/react` (dev). Justification per the
+repo's dependency discipline:
+
+- **Why not stdlib / ANSI-by-hand:** the UI needs a scrollable auto-following
+  output pane, spinners, elapsed timer, keyboard input and a final panel that
+  stays readable while new output arrives. Hand-rolled ANSI means owning
+  cursor addressing, line-wrap accounting, resize handling and raw-mode key
+  parsing — a large, bug-prone surface that is not the product. Ink gives a
+  retained layout model (React) over the terminal for less code than the ANSI
+  scaffolding alone.
+- **Does it couple core to anything?** No. All UI code lives in `src/cli/ui/`
+  and is loaded through a dynamic `import()` only on the TTY path — the plain
+  path, tests and CI never load ink/react. The TUI consumes the existing seams
+  (`RunObserver` callbacks on `runTask`, the run/task objects, verification
+  per-command callbacks); core/workspace/verification/adapters contain zero UI
+  references. The only engine changes were narrow, UI-agnostic seams:
+  `onCommandStart`/`onCommandEnd` on `runVerification` and an optional
+  `AbortSignal` on `runTask` (which also fixes Ctrl-C cancellation in plain
+  mode).
+- **Is it removable?** Yes — delete `src/cli/ui/` and the dynamic import; the
+  plain path is fully independent and is what the test-suite exercises.
+- **Also considered:** raw ANSI (rejected, see above), `blessed`/`node-blessed`
+  (older imperative widget model, weaker maintenance), and Ink alternatives like
+  OpenTUI (younger, native deps). Ink is the conservative mainstream choice and
+  v7 supports node >= 22 / ESM / React 19, matching our toolchain.
+
 ## Original Lot 4 contract sketch (historical)
 
 Informed by Lots 1–3: the orchestrator already has the seam (`startRun` → _adapter

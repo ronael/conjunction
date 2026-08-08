@@ -14,6 +14,7 @@ const USAGE = `conjunction — orchestration runtime for coding agents
 usage:
   conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--timeout <minutes>] [--model <model>] [--cleanup]
+                           [--plain]
   conjunction status [--repo <path>]
   conjunction doctor
 
@@ -25,6 +26,8 @@ commands:
 notes:
   --verify splits on whitespace; quote the whole command, not its arguments.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
+  an interactive TUI renders when stdout is a terminal; --plain forces text.
+  Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
 `;
 
 export interface CliDeps {
@@ -46,7 +49,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
       case "run": {
         const parsed = parseArgs(rest, {
           valueOptions: ["repo", "verify", "timeout", "model"],
-          flags: ["cleanup", "help"],
+          flags: ["cleanup", "help", "plain"],
         });
         if (parsed.flags.has("help")) {
           out(USAGE);
@@ -60,16 +63,39 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         const model = parsed.options.model?.at(-1);
         const adapter =
           deps.adapter ?? new CodexAdapter(model !== undefined ? { model } : undefined);
-        return await runTask(
-          {
-            description,
-            repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
-            verifyCommands: (parsed.options.verify ?? []).map(parseVerifyCommand),
-            timeoutMinutes,
-            cleanup: parsed.flags.has("cleanup"),
-          },
-          { adapter, out },
-        );
+        const runOptions = {
+          description,
+          repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
+          verifyCommands: (parsed.options.verify ?? []).map(parseVerifyCommand),
+          timeoutMinutes,
+          cleanup: parsed.flags.has("cleanup"),
+        };
+
+        // The TUI only takes over a real terminal the user is watching; tests
+        // (injected `out`), pipes and CI get the plain output, as does --plain.
+        const useTui =
+          !parsed.flags.has("plain") && deps.out === undefined && process.stdout.isTTY === true;
+        if (useTui) {
+          const { runWithTui } = await import("./ui/tui.js");
+          return await runWithTui(runOptions, { adapter });
+        }
+
+        // Plain mode: first Ctrl-C cancels the run gracefully through the
+        // AbortSignal; a second one force-exits.
+        const controller = new AbortController();
+        const onSigint = (): void => {
+          if (controller.signal.aborted) {
+            process.exit(130);
+          }
+          controller.abort();
+        };
+        process.on("SIGINT", onSigint);
+        try {
+          const result = await runTask(runOptions, { adapter, out, signal: controller.signal });
+          return result.exitCode;
+        } finally {
+          process.removeListener("SIGINT", onSigint);
+        }
       }
       case "status": {
         const parsed = parseArgs(rest, { valueOptions: ["repo"], flags: ["help"] });

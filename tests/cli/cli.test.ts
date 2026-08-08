@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { AgentAdapter, AgentRunInput, AgentRunResult } from "../../src/core/index.js";
 import { cli } from "../../src/cli/cli.js";
+import { runTask } from "../../src/cli/run-command.js";
 import { execGit } from "../../src/workspace/index.js";
 
 const tempDirs: string[] = [];
@@ -178,6 +179,53 @@ describe("cli run (stub adapter, real git repo)", () => {
     });
     expect(code).toBe(2);
     expect(io.text()).toContain("not a git repository");
+  });
+
+  it("accepts --plain and renders plain output", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("--- agent output ---");
+    expect(io.text()).toContain("--- summary ---");
+    expect(io.text()).toContain("state:    completed");
+  });
+
+  it("cancels a running agent through the AbortSignal (q / Ctrl-C path)", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const controller = new AbortController();
+    const waitingStub = stubAdapter(
+      (input) =>
+        new Promise((resolve) => {
+          input.signal?.addEventListener("abort", () => resolve({ exitCode: null, aborted: true }));
+        }),
+    );
+    const promise = runTask(
+      {
+        description: "wait forever",
+        repoPath: repo,
+        verifyCommands: [],
+        timeoutMinutes: 5,
+        cleanup: false,
+      },
+      { adapter: waitingStub, out: io.out, signal: controller.signal },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort();
+    const result = await promise;
+    expect(result.exitCode).toBe(1);
+    expect(result.run?.state).toBe("cancelled");
+    expect(io.text()).toContain("state:    cancelled");
+    // metadata on disk also records the cancellation
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string } };
+    expect(stored.run.state).toBe("cancelled");
   });
 });
 
