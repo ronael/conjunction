@@ -12,6 +12,7 @@ const ALL_STATES: RunState[] = [
   "pending",
   "running",
   "verifying",
+  "correcting",
   "completed",
   "failed",
   "cancelled",
@@ -20,14 +21,15 @@ const ALL_STATES: RunState[] = [
 const ALLOWED: Record<RunState, RunState[]> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed"],
+  verifying: ["completed", "failed", "correcting"],
+  correcting: ["verifying", "failed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
 };
 
 function makeRun(state: RunState): Run {
-  return { id: "run-1", taskId: "task-1", runtime: "stub", createdAt: "t0", state };
+  return { id: "run-1", taskId: "task-1", runtime: "stub", createdAt: "t0", state, attempts: [] };
 }
 
 describe("run state machine", () => {
@@ -76,5 +78,19 @@ describe("run state machine", () => {
     expect(run.completedAt).toBeUndefined();
     transitionRun(run, "cancelled", "t2");
     expect(run.completedAt).toBe("t2");
+  });
+
+  it("walks the correction loop: verifying -> correcting -> verifying -> completed", () => {
+    const run = makeRun("verifying");
+    transitionRun(run, "correcting", "t1");
+    transitionRun(run, "verifying", "t2");
+    transitionRun(run, "completed", "t3");
+    expect(run.state).toBe("completed");
+  });
+
+  it("correcting cannot restart or skip verification (no self-loop, no shortcuts)", () => {
+    for (const to of ["correcting", "running", "pending", "completed"] as const) {
+      expect(canTransition("correcting", to)).toBe(false);
+    }
   });
 });

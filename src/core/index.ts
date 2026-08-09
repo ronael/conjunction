@@ -17,11 +17,19 @@ export {
   canTransition,
   InvalidRunStateTransitionError,
   transitionRun,
+  type AgentAttemptOutcome,
+  type Attempt,
   type Run,
   type RunResult,
   type RunState,
   type VerificationOutcome,
 } from "./run.js";
+export {
+  buildCorrectionPacket,
+  PACKET_TAIL_LINES,
+  PACKET_TAIL_MAX_CHARS,
+  type FailedCommandReport,
+} from "./correction.js";
 export {
   EventStore,
   type AgentCompletedEvent,
@@ -29,6 +37,8 @@ export {
   type AgentStartedEvent,
   type ConjunctionEvent,
   type ConjunctionEventType,
+  type CorrectionCompletedEvent,
+  type CorrectionStartedEvent,
   type RunCancelledEvent,
   type RunCompletedEvent,
   type RunFailedEvent,
@@ -40,6 +50,7 @@ export {
   type WorkspaceCreatedEvent,
 } from "./events.js";
 export {
+  MAX_CORRECTIONS_PER_RUN,
   MissingDependencyError,
   Orchestrator,
   RunNotExecutableError,

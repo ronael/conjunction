@@ -2,7 +2,7 @@ import type { Run, RunState, Task } from "../../core/index.js";
 import type { CommandResult, VerificationCommand } from "../../verification/index.js";
 import type { RunTaskResult } from "../run-command.js";
 
-export type RunPhase = "setup" | "agent" | "verification" | "done";
+export type RunPhase = "setup" | "agent" | "verification" | "correcting" | "done";
 
 export interface OutputLine {
   stream: "stdout" | "stderr" | "system";
@@ -123,6 +123,18 @@ export class RunModel {
 
   startVerification(): void {
     this.phase = "verification";
+    // reset for a fresh pass (initial run or the post-correction re-check)
+    this.verifyItems = this.verifyItems.map((item) => ({ name: item.name, status: "pending" }));
+    this.#emit();
+  }
+
+  /** Lot 6: verification failed; the single correction attempt is starting. */
+  startCorrection(failedCommands: readonly string[]): void {
+    this.phase = "correcting";
+    this.appendOutput(
+      `── correction attempt 2/2: fixing failed verification (${failedCommands.join(", ")}) ──\n`,
+      "system",
+    );
     this.#emit();
   }
 

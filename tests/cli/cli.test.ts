@@ -194,6 +194,107 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(io.text()).toContain("state:    completed");
   });
 
+  it("lot 6: failed verify triggers one correction attempt, then completes", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const packets: (string | undefined)[] = [];
+    // attempt 1 does nothing (verify fails); attempt 2 receives the packet and fixes it
+    const fixingStub = stubAdapter(async (input) => {
+      packets.push(input.correctionPacket);
+      if (input.correctionPacket !== undefined) {
+        await writeFile(path.join(input.workspacePath, "good.txt"), "fixed\n");
+      }
+      return {};
+    });
+
+    const code = await cli(
+      ["run", "create good.txt", "--repo", repo, "--verify", "test -f good.txt"],
+      { adapter: fixingStub, out: io.out },
+    );
+
+    expect(code).toBe(0);
+    expect(packets).toHaveLength(2);
+    expect(packets[0]).toBeUndefined();
+    expect(packets[1]).toContain("PREVIOUS attempt in this worktree FAILED verification");
+    expect(packets[1]).toContain("test -f good.txt");
+    expect(packets[1]).toContain("exit 1");
+    expect(packets[1]).toContain("create good.txt"); // original objective carried over
+
+    const text = io.text();
+    expect(text).toContain("--- correction (attempt 2/2) ---");
+    expect(text).toContain("verification failed for: test -f good.txt");
+    expect(text).toContain("--- verification (attempt 2) ---");
+    expect(text).toContain("attempts: 2 (initial + correction)");
+    expect(text).toContain("state:    completed");
+
+    // both attempts persisted in the run JSON
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string; attempts: { index: number; correctionPacket?: string }[] } };
+    expect(stored.run.state).toBe("completed");
+    expect(stored.run.attempts.map((a) => a.index)).toEqual([1, 2]);
+    expect(stored.run.attempts[1]?.correctionPacket).toBe(packets[1]);
+
+    // correction events in the JSONL stream
+    const events = await readFile(
+      path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+      "utf8",
+    );
+    expect(events).toContain('"correction.started"');
+    expect(events).toContain('"correction.completed"');
+  });
+
+  it("lot 6: --no-correct fails immediately after a failed verify", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    let agentCalls = 0;
+    const countingStub = stubAdapter(() => {
+      agentCalls++;
+      return Promise.resolve({});
+    });
+
+    const code = await cli(
+      ["run", "create good.txt", "--repo", repo, "--verify", "test -f good.txt", "--no-correct"],
+      { adapter: countingStub, out: io.out },
+    );
+
+    expect(code).toBe(1);
+    expect(agentCalls).toBe(1);
+    expect(io.text()).toContain("state:    failed");
+    expect(io.text()).not.toContain("correction");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { attempts: unknown[] } };
+    expect(stored.run.attempts).toHaveLength(1);
+  });
+
+  it("lot 6: correction that still fails ends failed (cap: no third attempt)", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    let agentCalls = 0;
+    const neverFixesStub = stubAdapter(() => {
+      agentCalls++;
+      return Promise.resolve({});
+    });
+
+    const code = await cli(
+      ["run", "create good.txt", "--repo", repo, "--verify", "test -f good.txt"],
+      { adapter: neverFixesStub, out: io.out },
+    );
+
+    expect(code).toBe(1);
+    expect(agentCalls).toBe(2); // initial + the single correction, never a third
+    expect(io.text()).toContain("state:    failed");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string; attempts: unknown[] } };
+    expect(stored.run.state).toBe("failed");
+    expect(stored.run.attempts).toHaveLength(2);
+  });
+
   it("cancels a running agent through the AbortSignal (q / Ctrl-C path)", async () => {
     const repo = await makeTempRepo();
     const io = capture();
@@ -211,6 +312,7 @@ describe("cli run (stub adapter, real git repo)", () => {
         verifyCommands: [],
         timeoutMinutes: 5,
         cleanup: false,
+        correct: false,
       },
       { adapter: waitingStub, out: io.out, signal: controller.signal },
     );

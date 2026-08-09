@@ -16,6 +16,7 @@ function makeRun(state: Run["state"]): Run {
     runtime: "codex-cli",
     createdAt: "t0",
     state,
+    attempts: [],
     branch: "conjunction/a1b2c3d4",
     workspacePath: "/tmp/repo/.conjunction/worktrees/a1b2c3d4",
   };
@@ -246,6 +247,64 @@ describe("RunApp", () => {
     await flush();
     expect(lastFrame() ?? "").toContain("(autoscroll)");
     expect(lastFrame() ?? "").toContain("line-19");
+    unmount();
+  });
+
+  it("renders the correction phase distinctly and resets verification items", async () => {
+    const model = runningModel();
+    model.verifyItems = [{ name: "test", status: "pending" }];
+    model.startVerification();
+    model.commandStarted({ name: "test", command: "test", args: [] });
+    model.commandFinished({
+      name: "test",
+      command: "test",
+      args: [],
+      exitCode: 1,
+      stdout: "",
+      stderr: "boom",
+      durationMs: 42,
+      timedOut: false,
+    });
+    model.startCorrection(["test"]);
+
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+    );
+    await flush();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("CORRECTING (attempt 2/2)");
+    expect(frame).toContain("correction attempt 2/2: fixing failed verification (test)");
+    // while correcting, the pane still shows what failed…
+    expect(frame).toContain("● test");
+    expect(frame).toContain("✗ exit 1");
+
+    // …and resets to pending when the re-check starts
+    model.startVerification();
+    await flush();
+    const recheck = lastFrame() ?? "";
+    expect(recheck).toContain("VERIFYING");
+    expect(recheck).toContain("pending");
+    expect(recheck).not.toContain("✗ exit 1");
+    unmount();
+  });
+
+  it("final panel notes how many attempts ran", async () => {
+    const model = runningModel();
+    const result = finalResult("completed");
+    result.run = {
+      ...result.run!,
+      attempts: [
+        { index: 1, startedAt: "t1", completedAt: "t2" },
+        { index: 2, startedAt: "t3", completedAt: "t4", correctionPacket: "…" },
+      ],
+    };
+    model.finish(result);
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+    );
+    await flush();
+    expect(lastFrame() ?? "").toContain("attempts: 2 (initial + correction)");
     unmount();
   });
 });

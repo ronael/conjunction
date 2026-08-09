@@ -14,7 +14,7 @@ const USAGE = `conjunction — orchestration runtime for coding agents
 usage:
   conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--timeout <minutes>] [--model <model>] [--cleanup]
-                           [--plain]
+                           [--plain] [--no-correct]
   conjunction status [--repo <path>]
   conjunction doctor
 
@@ -25,6 +25,8 @@ commands:
 
 notes:
   --verify splits on whitespace; quote the whole command, not its arguments.
+  failed verification triggers ONE correction attempt (same worker, bounded
+  packet) then a re-check; --no-correct disables it. No --verify, no correction.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
   Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
@@ -49,7 +51,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
       case "run": {
         const parsed = parseArgs(rest, {
           valueOptions: ["repo", "verify", "timeout", "model"],
-          flags: ["cleanup", "help", "plain"],
+          flags: ["cleanup", "help", "plain", "no-correct"],
         });
         if (parsed.flags.has("help")) {
           out(USAGE);
@@ -63,12 +65,15 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         const model = parsed.options.model?.at(-1);
         const adapter =
           deps.adapter ?? new CodexAdapter(model !== undefined ? { model } : undefined);
+        const verifyCommands = (parsed.options.verify ?? []).map(parseVerifyCommand);
         const runOptions = {
           description,
           repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
-          verifyCommands: (parsed.options.verify ?? []).map(parseVerifyCommand),
+          verifyCommands,
           timeoutMinutes,
           cleanup: parsed.flags.has("cleanup"),
+          // correction only makes sense with something to correct against
+          correct: verifyCommands.length > 0 && !parsed.flags.has("no-correct"),
         };
 
         // The TUI only takes over a real terminal the user is watching; tests

@@ -3,17 +3,25 @@
  *
  * Allowed transitions (enforced by the state machine below):
  *
- *   pending   -> running | cancelled
- *   running   -> verifying | failed | cancelled
- *   verifying -> completed | failed
+ *   pending    -> running | cancelled
+ *   running    -> verifying | failed | cancelled
+ *   verifying  -> completed | failed | correcting
+ *   correcting -> verifying | failed | cancelled
  *   completed / failed / cancelled are terminal.
+ *
+ * `correcting` is the bounded feedback loop (lot 6): a failed verification may
+ * trigger exactly one correction attempt, after which the run re-enters
+ * `verifying`. The orchestrator enforces the cap; from `correcting` the only
+ * way back is `verifying` (re-check) or a terminal state — no cycle can loop.
  */
-export type RunState = "pending" | "running" | "verifying" | "completed" | "failed" | "cancelled";
+export type RunState =
+  "pending" | "running" | "verifying" | "correcting" | "completed" | "failed" | "cancelled";
 
 const ALLOWED_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed"],
+  verifying: ["completed", "failed", "correcting"],
+  correcting: ["verifying", "failed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
@@ -60,14 +68,36 @@ export interface RunResult {
   error?: string;
 }
 
+/** Process outcome of one agent attempt (initial or correction). */
+export interface AgentAttemptOutcome {
+  exitCode: number | null;
+  timedOut: boolean;
+  aborted: boolean;
+  summary?: string;
+}
+
 /**
- * One attempt to execute a task.
+ * One agent attempt within a run. Index 1 is the initial attempt; index 2 is
+ * the (single, capped) correction attempt and carries the packet that was
+ * sent. Recorded on the run so both attempts persist like the rest of the run.
+ */
+export interface Attempt {
+  index: number;
+  startedAt: string;
+  completedAt?: string;
+  agentResult?: AgentAttemptOutcome;
+  /** The exact correction packet sent to the agent (correction attempts only). */
+  correctionPacket?: string;
+}
+
+/**
+ * One orchestrated execution of a task, including bounded correction attempts.
  * All timestamps are ISO-8601 strings so runs serialize without loss.
  */
 export interface Run {
   readonly id: string;
   readonly taskId: string;
-  /** Free-form runtime identifier (e.g. "codex-cli"); no adapter exists yet. */
+  /** Free-form runtime identifier (e.g. "codex-cli"). */
   runtime: string;
   workspacePath?: string;
   branch?: string;
@@ -75,6 +105,7 @@ export interface Run {
   startedAt?: string;
   completedAt?: string;
   state: RunState;
+  attempts: Attempt[];
   result?: RunResult;
   verificationResult?: VerificationOutcome;
 }

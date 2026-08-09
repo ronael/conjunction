@@ -1,7 +1,7 @@
 import path from "node:path";
 
-import type { AgentAdapter, Run, Task } from "../core/index.js";
-import { Orchestrator } from "../core/index.js";
+import type { AgentAdapter, Run, RunState, Task } from "../core/index.js";
+import { buildCorrectionPacket, Orchestrator } from "../core/index.js";
 import type {
   CommandResult,
   VerificationCommand,
@@ -24,6 +24,11 @@ export interface RunTaskOptions {
   verifyCommands: VerificationCommand[];
   timeoutMinutes: number;
   cleanup: boolean;
+  /**
+   * Lot 6: on verification failure, send one bounded correction packet to the
+   * same worker and re-verify. Meaningful only when verifyCommands is non-empty.
+   */
+  correct: boolean;
 }
 
 /**
@@ -38,6 +43,8 @@ export interface RunObserver {
   verificationStarted?(): void;
   commandStarted?(command: VerificationCommand): void;
   commandFinished?(command: VerificationCommand, result: CommandResult): void;
+  /** Verification failed and the single correction attempt is starting. */
+  correctionStarted?(failedCommands: string[]): void;
 }
 
 export interface RunTaskDeps {
@@ -151,11 +158,51 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       out("\n--- verification ---\n");
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
-      await orchestrator.verifyRun(run.id);
+      await orchestrator.verifyRun(run.id, { correction: options.correct });
       await flush(task, run);
+
+      // Lot 6: one bounded correction attempt against the same worktree.
+      // (cast: verifyRun mutates run.state past the narrowing above)
+      if ((run.state as RunState) === "correcting" && lastVerification !== undefined) {
+        const failedResults = lastVerification.results.filter(
+          (result) => result.timedOut || result.exitCode !== 0,
+        );
+        const failedNames = failedResults.map((result) => result.name);
+        const passedNames = lastVerification.results
+          .filter((result) => !result.timedOut && result.exitCode === 0)
+          .map((result) => result.name);
+        const packet = buildCorrectionPacket(
+          task,
+          failedResults.map((result) => ({
+            name: result.name,
+            commandLine: [result.command, ...result.args].join(" "),
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          })),
+          passedNames,
+        );
+
+        out("\n--- correction (attempt 2/2) ---\n");
+        out(`verification failed for: ${failedNames.join(", ")}\n`);
+        out("sending a correction packet to the same worker\n");
+        out("\n--- agent output (attempt 2) ---\n");
+        observer?.correctionStarted?.(failedNames);
+        await orchestrator.executeCorrection(run.id, packet, executeOptions);
+        await flush(task, run);
+
+        if ((run.state as RunState) === "correcting") {
+          out("\n--- verification (attempt 2) ---\n");
+          observer?.verificationStarted?.();
+          // no correction option: the cap makes this outcome terminal
+          await orchestrator.verifyRun(run.id, { correction: false });
+          await flush(task, run);
+        }
+      }
     }
   } catch (error) {
-    if (run.state === "running" || run.state === "verifying") {
+    if (run.state === "running" || run.state === "verifying" || run.state === "correcting") {
       orchestrator.failRun(run.id, (error as Error).message);
     } else if (run.state === "pending") {
       orchestrator.cancelRun(run.id, (error as Error).message);
@@ -167,6 +214,12 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   out("\n--- summary ---\n");
   out(`run:      ${run.id}\n`);
   out(`state:    ${run.state}\n`);
+  if (run.attempts.length > 0) {
+    out(
+      `attempts: ${run.attempts.length}` +
+        `${run.attempts.length > 1 ? " (initial + correction)" : ""}\n`,
+    );
+  }
   out(`branch:   ${run.branch ?? "-"}\n`);
   out(`worktree: ${run.workspacePath ?? "-"}\n`);
   if (run.result?.summary !== undefined) {

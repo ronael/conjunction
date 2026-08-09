@@ -86,7 +86,9 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   run(input: AgentRunInput): Promise<AgentRunResult> {
-    const prompt = buildPrompt(input.task);
+    // Lot 6: a correction packet replaces the task-derived prompt (it already
+    // carries the task framing and the workspace/git safety rules).
+    const prompt = input.correctionPacket ?? buildPrompt(input.task);
     const lastMessageFile = path.join(tmpdir(), `conjunction-codex-${randomUUID()}.txt`);
     const args = [
       "exec",

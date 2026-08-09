@@ -71,6 +71,7 @@ export async function runWithTui(
       verificationStarted: () => model.startVerification(),
       commandStarted: (command) => model.commandStarted(command),
       commandFinished: (_command, commandResult) => model.commandFinished(commandResult),
+      correctionStarted: (failedCommands) => model.startCorrection(failedCommands),
     },
   });
 

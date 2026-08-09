@@ -53,6 +53,27 @@ Options:
 - `--cleanup` — attempt to remove the worktree+branch after the run. Removal
   is refused (and the worktree preserved) when it has uncommitted changes.
 - `--plain` — force plain text output (no TUI), same as piping/CI behavior.
+- `--no-correct` — disable the correction loop (see below).
+
+## Correction loop (lot 6)
+
+When at least one `--verify` command is configured and verification fails,
+Conjunction sends ONE bounded correction attempt to the same worker in the same
+worktree:
+
+1. the failed commands (with bounded stdout/stderr tails) are built into a
+   deterministic correction packet — the previous agent transcript is never
+   included;
+2. the agent runs again with that packet ("fix the failures, don't redo the
+   work");
+3. verification re-runs. The result is terminal: `completed` or `failed`.
+   There is no third attempt, ever.
+
+Both attempts are recorded on the run (`attempts` in the run JSON, plus
+`correction.started` / `correction.completed` events). Plain output marks the
+boundary with `--- correction (attempt 2/2) ---`; the TUI shows a
+`CORRECTING (attempt 2/2)` phase. `--no-correct` disables the loop; without
+`--verify` there is nothing to correct against and no correction happens.
 
 ## Interactive TUI
 

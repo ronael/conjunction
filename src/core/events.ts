@@ -51,6 +51,16 @@ export interface RunCompletedEvent
 export interface RunCancelledEvent
   extends EventBase<"run.cancelled", { reason?: string }>, RunScoped {}
 
+export interface CorrectionStartedEvent
+  extends
+    EventBase<"correction.started", { attemptIndex: number; failedCommands: string[] }>,
+    RunScoped {}
+
+export interface CorrectionCompletedEvent
+  extends
+    EventBase<"correction.completed", { attemptIndex: number; failedCommands: string[] }>,
+    RunScoped {}
+
 export type ConjunctionEvent =
   | TaskCreatedEvent
   | RunStartedEvent
@@ -63,7 +73,9 @@ export type ConjunctionEvent =
   | VerificationPassedEvent
   | RunFailedEvent
   | RunCompletedEvent
-  | RunCancelledEvent;
+  | RunCancelledEvent
+  | CorrectionStartedEvent
+  | CorrectionCompletedEvent;
 
 export type ConjunctionEventType = ConjunctionEvent["type"];
 

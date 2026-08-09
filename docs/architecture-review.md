@@ -137,6 +137,41 @@ database. Verified end-to-end against real codex-cli 0.144.1: a smoke task
 `conjunction/<runId>` created, file written inside the worktree only, metadata and
 events persisted, summary printed, user's branch untouched.
 
+## Lot 6 — bounded correction loop (as implemented)
+
+**Decision: one Run, bounded correction attempts** — a deliberate reinterpretation
+of the handoff's "Run = one attempt". A Run is now one orchestrated execution of a
+task, which may include bounded correction attempts. Rationale: the user's unit of
+work is "run this task"; splitting corrections into separate Runs sharing a worktree
+would complicate cleanup semantics, branch naming (`conjunction/<runId>` stays
+unique), and the TUI/status UX, for no correctness gain. Both attempts are recorded
+on the run (`run.attempts[]`, persisted in the run JSON), so nothing is hidden.
+
+Design:
+
+- **State machine** gained one state: `correcting`. Transitions:
+  `verifying → correcting` (only when correction is enabled and the cap allows) and
+  `correcting → verifying | failed | cancelled`. From `correcting` there is no path
+  back to `running`/`pending` and no self-loop — a cycle is structurally impossible,
+  and `MAX_CORRECTIONS_PER_RUN = 1` is enforced by the orchestrator on top.
+- **Events**: `correction.started` / `correction.completed`, payloads
+  `{ attemptIndex, failedCommands }`. Existing events untouched; `agent.started` /
+  `agent.output` / `agent.completed` fire for the correction attempt as well.
+- **Correction packet** (`buildCorrectionPacket`, pure, in `src/core/correction.ts`):
+  original objective/constraints/acceptance criteria; ONLY the failed commands with
+  name, command line, exit state, and bounded stdout/stderr tails (last 200 lines /
+  20k chars each); passing checks summarized in one line; explicit "fix, don't redo"
+  framing; the same workspace/git-safety rules as the initial prompt. The previous
+  agent transcript is never included.
+- **Adapter seam**: `AgentRunInput.correctionPacket` replaces the task-derived
+  prompt when set — prompt ownership stays in the adapter.
+- **CLI**: correction is on by default when at least one `--verify` is given
+  (`--no-correct` disables; no verification → nothing to correct against). Plain
+  mode logs `--- correction (attempt 2/2) ---` boundaries; the TUI shows a
+  `CORRECTING (attempt 2/2)` phase, keeps streaming agent output, resets the
+  verification pane for the re-check, and notes the attempt count in the final
+  panel. Exit codes unchanged: 0 only if the FINAL verification passes.
+
 ## TUI (Ink) — dependency decision
 
 `conjunction run` renders an interactive TUI when stdout is a TTY (plain text

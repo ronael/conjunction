@@ -17,6 +17,11 @@ export interface AgentRunInput {
   signal?: AbortSignal;
   /** Streaming output; the orchestrator turns chunks into agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /**
+   * Lot 6 feedback loop: when set, this packet REPLACES the task-derived
+   * prompt (it already contains the task framing and workspace rules).
+   */
+  correctionPacket?: string;
 }
 
 export interface AgentRunResult {

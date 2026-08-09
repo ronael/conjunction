@@ -11,6 +11,7 @@ function modelWithContext(): RunModel {
       runtime: "stub",
       createdAt: "t0",
       state: "running",
+      attempts: [],
       branch: "conjunction/a1b2c3d4",
       workspacePath: "/tmp/wt",
     },
@@ -154,6 +155,7 @@ describe("RunModel lifecycle", () => {
         runtime: "stub",
         createdAt: "t0",
         state: "completed",
+        attempts: [],
       },
       task: {
         id: "task-1",
@@ -166,5 +168,31 @@ describe("RunModel lifecycle", () => {
     });
     expect(model.phase).toBe("done");
     expect(model.finalState).toBe("completed");
+  });
+});
+
+describe("RunModel correction phase (lot 6)", () => {
+  it("startCorrection switches phase and appends a boundary line to the output", () => {
+    const model = modelWithContext();
+    model.verifyItems = [{ name: "test", status: "failed", exitCode: 1 }];
+    model.startCorrection(["test"]);
+    expect(model.phase).toBe("correcting");
+    expect(model.lines.at(-1)?.text).toContain("correction attempt 2/2");
+    expect(model.lines.at(-1)?.text).toContain("test");
+    expect(model.lines.at(-1)?.stream).toBe("system");
+  });
+
+  it("startVerification resets all items to pending for the re-check", () => {
+    const model = modelWithContext();
+    model.verifyItems = [
+      { name: "typecheck", status: "passed", exitCode: 0, durationMs: 10 },
+      { name: "test", status: "failed", exitCode: 1, stderrTail: ["boom"] },
+    ];
+    model.startVerification();
+    expect(model.phase).toBe("verification");
+    expect(model.verifyItems).toEqual([
+      { name: "typecheck", status: "pending" },
+      { name: "test", status: "pending" },
+    ]);
   });
 });

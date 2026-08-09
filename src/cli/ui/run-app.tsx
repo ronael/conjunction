@@ -27,6 +27,8 @@ function phaseLabel(model: RunModel): string {
       return "RUNNING (agent)";
     case "verification":
       return "VERIFYING";
+    case "correcting":
+      return "CORRECTING (attempt 2/2)";
     case "done":
       return (model.finalState ?? "unknown").toUpperCase();
   }
@@ -88,6 +90,12 @@ function FinalPanel({ model }: { model: RunModel }): React.JSX.Element {
       <Text>
         {"│ "} {headline}
       </Text>
+      {result?.run !== undefined && result.run.attempts.length > 0 && (
+        <Text>
+          {"│ "} attempts: {result.run.attempts.length}
+          {result.run.attempts.length > 1 ? " (initial + correction)" : ""}
+        </Text>
+      )}
       {result?.run?.branch !== undefined && (
         <Text>
           {"│ "} branch: {result.run?.branch}
