@@ -323,4 +323,56 @@ describe("RunApp", () => {
     expect(lastFrame() ?? "").toContain("2 (initial + correction)");
     unmount();
   });
+
+  it("renders the Review checklist step and findings in the final box", async () => {
+    const model = runningModel();
+    model.startReview();
+    {
+      const { lastFrame, unmount } = render(
+        <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
+      );
+      await flush();
+      expect(lastFrame() ?? "").toContain("Review");
+      unmount();
+    }
+
+    const findings = Array.from({ length: 7 }, (_, i) => ({
+      severity: (i === 0 ? "critical" : i === 1 ? "major" : "nit") as "critical" | "major" | "nit",
+      message: `finding ${i}`,
+      ...(i === 0 ? { path: "src/a.ts" } : {}),
+    }));
+    model.finishReview({
+      summary: "…",
+      findings,
+      structured: true,
+      completedAt: "t2",
+      agentResult: { exitCode: 0, timedOut: false, aborted: false },
+    });
+    const result = finalResult("completed");
+    result.run = {
+      ...result.run!,
+      review: {
+        summary: "…",
+        findings,
+        structured: true,
+        completedAt: "t2",
+        agentResult: { exitCode: 0, timedOut: false, aborted: false },
+      },
+    };
+    model.finish(result);
+
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("✓ Review");
+    expect(frame).toContain("7 findings (1 critical, 1 major, 5 nit)");
+    expect(frame).toContain("[critical]");
+    expect(frame).toContain("src/a.ts: finding 0");
+    expect(frame).toContain("finding 4");
+    expect(frame).not.toContain("finding 5"); // capped at 5
+    expect(frame).toContain("+2 more in the run JSON");
+    unmount();
+  });
 });

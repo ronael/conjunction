@@ -21,6 +21,7 @@ export {
   type Attempt,
   type Run,
   type RunResult,
+  type RunReview,
   type RunState,
   type VerificationOutcome,
 } from "./run.js";
@@ -30,6 +31,19 @@ export {
   PACKET_TAIL_MAX_CHARS,
   type FailedCommandReport,
 } from "./correction.js";
+export {
+  buildReviewerPacket,
+  DIFF_TRUNCATION_MARKER,
+  parseReviewReport,
+  REVIEW_DIFF_MAX_CHARS,
+  REVIEW_DIFF_MAX_LINES,
+  REVIEW_OUTPUT_SCHEMA,
+  REVIEW_SEVERITIES,
+  type ReviewFinding,
+  type ReviewReport,
+  type ReviewSeverity,
+  type ReviewVerificationSummary,
+} from "./review.js";
 export {
   EventStore,
   type AgentCompletedEvent,
@@ -43,6 +57,9 @@ export {
   type RunCompletedEvent,
   type RunFailedEvent,
   type RunStartedEvent,
+  type ReviewCompletedEvent,
+  type ReviewCompletedPayload,
+  type ReviewStartedEvent,
   type TaskCreatedEvent,
   type VerificationFailedEvent,
   type VerificationPassedEvent,

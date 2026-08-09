@@ -1,3 +1,5 @@
+import type { ReviewFinding } from "./review.js";
+
 /**
  * Run lifecycle states.
  *
@@ -5,23 +7,36 @@
  *
  *   pending    -> running | cancelled
  *   running    -> verifying | failed | cancelled
- *   verifying  -> completed | failed | correcting
+ *   verifying  -> completed | failed | correcting | reviewing
  *   correcting -> verifying | failed | cancelled
+ *   reviewing  -> completed | cancelled
  *   completed / failed / cancelled are terminal.
  *
  * `correcting` is the bounded feedback loop (lot 6): a failed verification may
  * trigger exactly one correction attempt, after which the run re-enters
  * `verifying`. The orchestrator enforces the cap; from `correcting` the only
  * way back is `verifying` (re-check) or a terminal state — no cycle can loop.
+ *
+ * `reviewing` (lot 7) is entered only from a PASSED verification when review
+ * is enabled, and always terminates in `completed` (reviewer failures are
+ * advisory, they never fail the run) or `cancelled`.
  */
 export type RunState =
-  "pending" | "running" | "verifying" | "correcting" | "completed" | "failed" | "cancelled";
+  | "pending"
+  | "running"
+  | "verifying"
+  | "correcting"
+  | "reviewing"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 const ALLOWED_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed", "correcting"],
+  verifying: ["completed", "failed", "correcting", "reviewing"],
   correcting: ["verifying", "failed", "cancelled"],
+  reviewing: ["completed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
@@ -76,6 +91,17 @@ export interface AgentAttemptOutcome {
   summary?: string;
 }
 
+/** Lot 7: outcome of the independent, read-only reviewer invocation. */
+export interface RunReview {
+  summary: string;
+  findings: ReviewFinding[];
+  /** false = reviewer output was not parseable; findings[0] holds the raw text. */
+  structured: boolean;
+  completedAt: string;
+  agentResult: AgentAttemptOutcome;
+  /** Set when the reviewer invocation itself failed — advisory, run unaffected. */
+  error?: string;
+}
 /**
  * One agent attempt within a run. Index 1 is the initial attempt; index 2 is
  * the (single, capped) correction attempt and carries the packet that was
@@ -108,6 +134,8 @@ export interface Run {
   attempts: Attempt[];
   result?: RunResult;
   verificationResult?: VerificationOutcome;
+  /** Lot 7: independent reviewer outcome (advisory; only when --review). */
+  review?: RunReview;
 }
 
 /**

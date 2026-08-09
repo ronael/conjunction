@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { RunReview } from "../../../src/core/index.js";
 import { MAX_OUTPUT_LINES, RunModel } from "../../../src/cli/ui/run-model.js";
 
 function modelWithContext(): RunModel {
@@ -293,6 +294,51 @@ describe("RunModel checklist steps", () => {
       },
     });
     expect(model.steps.find((s) => s.id === "agent-1")?.status).toBe("failed");
+  });
+});
+
+describe("RunModel review step (lot 7)", () => {
+  const review: RunReview = {
+    summary: "ok",
+    findings: [
+      { severity: "major", message: "edge case" },
+      { severity: "nit", message: "naming" },
+    ],
+    structured: true,
+    completedAt: "t2",
+    agentResult: { exitCode: 0, timedOut: false, aborted: false },
+  };
+
+  it("startReview adds an active Review step; finishReview completes it with the summary", () => {
+    const model = modelWithContext();
+    model.startReview();
+    expect(model.phase).toBe("review");
+    expect(model.steps.find((s) => s.id === "review")).toMatchObject({
+      status: "active",
+      label: "Review",
+    });
+    model.finishReview(review);
+    expect(model.steps.find((s) => s.id === "review")).toMatchObject({
+      status: "done",
+      detail: "2 findings (1 major, 1 nit)",
+    });
+  });
+
+  it("an errored reviewer stays green with an advisory detail", () => {
+    const model = modelWithContext();
+    model.startReview();
+    model.finishReview({ ...review, findings: [], error: "reviewer timed out" });
+    expect(model.steps.find((s) => s.id === "review")).toMatchObject({
+      status: "done",
+      detail: "unavailable (advisory)",
+    });
+  });
+
+  it("no findings renders as 'no findings'", () => {
+    const model = modelWithContext();
+    model.startReview();
+    model.finishReview({ ...review, findings: [] });
+    expect(model.steps.find((s) => s.id === "review")?.detail).toBe("no findings");
   });
 });
 

@@ -23,13 +23,15 @@ export async function statusCommand(
     return 0;
   }
   for (const { run, task } of stored) {
-    // defensive: metadata written by older versions may lack `attempts`
+    // defensive: metadata written by older versions may lack `attempts`/`review`
     const attemptCount = Array.isArray(run.attempts) ? run.attempts.length : 0;
     const attempts = attemptCount > 1 ? ` (${attemptCount} attempts)` : "";
+    const findingCount = run.review?.findings?.length ?? 0;
+    const findings = findingCount > 0 ? ` · ${findingCount} findings` : "";
     out(
       `${stateSymbol(run.state)} ${run.id.slice(0, 8)}  ` +
         `${stateLabel(run.state).padEnd(9)}  ${run.runtime}  ${run.createdAt}  ` +
-        `${task.title}${attempts}\n`,
+        `${task.title}${attempts}${findings}\n`,
     );
     if (run.branch !== undefined) {
       out(`   ${"Branch".padEnd(9)}${run.branch}\n`);

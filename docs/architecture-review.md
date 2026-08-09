@@ -172,6 +172,45 @@ Design:
   verification pane for the re-check, and notes the attempt count in the final
   panel. Exit codes unchanged: 0 only if the FINAL verification passes.
 
+## Lot 7 — independent reviewer (as implemented)
+
+**Decisions applied (and why):**
+
+1. **Opt-in via `--review`.** A review is a second paid agent call; default runs
+   stay fast/cheap. `--review` without `--verify` is allowed (review stands alone
+   after the agent attempt, via the vacuous verification pass).
+2. **Review only after the FINAL verification passed.** New state `reviewing` with
+   exactly two new edges: `verifying → reviewing` (pass + review enabled) and
+   `reviewing → completed | cancelled`. No `running → reviewing` edge: the
+   no-verify path goes through the (vacuous) verifyRun like everything else, so
+   one entry point suffices — minimal correct edge set. Failed verification
+   (correction exhausted or disabled) never reviews.
+3. **Advisory by construction.** Findings never change the exit code and never
+   feed the correction loop. Reopening self-healing via review findings is
+   explicitly future work (a bounded review-driven second correction would need
+   a separate cap, not a loosening of `MAX_CORRECTIONS_PER_RUN`).
+4. **Same adapter, read-only, structured.** `AgentRunInput` gained
+   `promptOverride` (renamed from `correctionPacket` — it now serves both
+   packets), `readOnly` (codex maps to `-s read-only`; the adapter can only ever
+   emit `workspace-write` or `read-only`) and `outputSchema` (runtime-agnostic
+   JSON Schema; codex writes it to a temp file and passes `--output-schema`).
+   The reviewer's prompt (`buildReviewerPacket`, pure) carries objective +
+   constraints + acceptance criteria + the bounded worktree diff (2000 lines /
+   100k chars, truncation marker) + a one-line-per-command verification summary.
+   The implementer transcript is structurally absent from the input type.
+
+**Reviewer-failure policy:** a reviewer crash/timeout/malformed-output never
+fails the run. Crash/timeout → `run.review.error` + `review.completed` with
+`errored: true`, run completes (plain output shows `• Review unavailable
+(advisory)`). Malformed output → `parseReviewReport` falls back to one
+unstructured finding holding the raw text (`structured: false` on
+`run.review`). Abort (q / Ctrl-C) is the only reviewer outcome that changes the
+run — it cancels it.
+
+Findings persist on the run (`run.review: { summary, findings, structured,
+completedAt, agentResult, error? }`) and counts flow through the
+`review.started` / `review.completed` events.
+
 ## TUI (Ink) — dependency decision
 
 `conjunction run` renders an interactive TUI when stdout is a TTY (plain text

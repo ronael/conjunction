@@ -14,7 +14,7 @@ const USAGE = `conjunction — orchestration runtime for coding agents
 usage:
   conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--timeout <minutes>] [--model <model>] [--cleanup]
-                           [--plain] [--no-correct]
+                           [--plain] [--no-correct] [--review]
   conjunction status [--repo <path>]
   conjunction doctor
 
@@ -27,6 +27,8 @@ notes:
   --verify splits on whitespace; quote the whole command, not its arguments.
   failed verification triggers ONE correction attempt (same worker, bounded
   packet) then a re-check; --no-correct disables it. No --verify, no correction.
+  --review runs an independent READ-ONLY reviewer after verification passes;
+  findings are advisory and never change the exit code.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
   Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
@@ -51,7 +53,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
       case "run": {
         const parsed = parseArgs(rest, {
           valueOptions: ["repo", "verify", "timeout", "model"],
-          flags: ["cleanup", "help", "plain", "no-correct"],
+          flags: ["cleanup", "help", "plain", "no-correct", "review"],
         });
         if (parsed.flags.has("help")) {
           out(USAGE);
@@ -74,6 +76,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           cleanup: parsed.flags.has("cleanup"),
           // correction only makes sense with something to correct against
           correct: verifyCommands.length > 0 && !parsed.flags.has("no-correct"),
+          review: parsed.flags.has("review"),
         };
 
         // The TUI only takes over a real terminal the user is watching; tests

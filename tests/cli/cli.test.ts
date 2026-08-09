@@ -208,8 +208,8 @@ describe("cli run (stub adapter, real git repo)", () => {
     const packets: (string | undefined)[] = [];
     // attempt 1 does nothing (verify fails); attempt 2 receives the packet and fixes it
     const fixingStub = stubAdapter(async (input) => {
-      packets.push(input.correctionPacket);
-      if (input.correctionPacket !== undefined) {
+      packets.push(input.promptOverride);
+      if (input.promptOverride !== undefined) {
         await writeFile(path.join(input.workspacePath, "good.txt"), "fixed\n");
       }
       return {};
@@ -304,6 +304,112 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(stored.run.attempts).toHaveLength(2);
   });
 
+  it("lot 7: --review runs the read-only reviewer after verification passes", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const reviewInputs: { readOnly?: boolean; schema?: unknown }[] = [];
+    const reviewingStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        reviewInputs.push({ readOnly: input.readOnly, schema: input.outputSchema });
+        return {
+          lastMessage: JSON.stringify({
+            summary: "fine with nits",
+            findings: [
+              { severity: "major", path: "hello.txt", message: "trailing newline missing" },
+              { severity: "nit", message: "consider a shorter greeting" },
+            ],
+          }),
+        };
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hello conjunction\n");
+      return {};
+    });
+
+    const code = await cli(
+      ["run", "create hello.txt", "--repo", repo, "--verify", "test -f hello.txt", "--review"],
+      { adapter: reviewingStub, out: io.out },
+    );
+
+    expect(code).toBe(0);
+    expect(reviewInputs).toHaveLength(1);
+    expect(reviewInputs[0]?.readOnly).toBe(true);
+    expect(reviewInputs[0]?.schema).toBeDefined();
+
+    const text = io.text();
+    expect(text).toContain("── review ──");
+    expect(text).toContain("✓ Review");
+    expect(text).toContain("2 findings (1 major, 1 nit)");
+    expect(text).toContain("• [major] hello.txt: trailing newline missing");
+    expect(text).toContain("Review:    2 findings (1 major, 1 nit)");
+    expect(text).toContain("State:     COMPLETED");
+
+    // findings persisted on the run JSON + review events in the stream
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { review?: { findings: unknown[]; structured: boolean } } };
+    expect(stored.run.review?.structured).toBe(true);
+    expect(stored.run.review?.findings).toHaveLength(2);
+    const events = await readFile(
+      path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+      "utf8",
+    );
+    expect(events).toContain('"review.started"');
+    expect(events).toContain('"review.completed"');
+    expect(events).toContain('"total":2');
+
+    // status shows the findings count
+    const statusIo = capture();
+    await cli(["status", "--repo", repo], { out: statusIo.out });
+    expect(statusIo.text()).toContain("2 findings");
+  });
+
+  it("lot 7: --review works without --verify", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const reviewingStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--review"], {
+      adapter: reviewingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("✓ Review");
+    expect(io.text()).toContain("no findings");
+    expect(io.text()).toContain("State:     COMPLETED");
+  });
+
+  it("lot 7: reviewer crash is advisory — run still completes with exit 0", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const crashingReviewerStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        return { exitCode: 1 };
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--review"], {
+      adapter: crashingReviewerStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("• Review");
+    expect(io.text()).toContain("unavailable (advisory)");
+    expect(io.text()).toContain("State:     COMPLETED");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string; review?: { error?: string } } };
+    expect(stored.run.state).toBe("completed");
+    expect(stored.run.review?.error).toBe("reviewer exited with code 1");
+  });
+
   it("cancels a running agent through the AbortSignal (q / Ctrl-C path)", async () => {
     const repo = await makeTempRepo();
     const io = capture();
@@ -322,6 +428,7 @@ describe("cli run (stub adapter, real git repo)", () => {
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
+        review: false,
       },
       { adapter: waitingStub, out: io.out, signal: controller.signal },
     );

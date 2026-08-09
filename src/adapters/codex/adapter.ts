@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -85,22 +85,36 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
-  run(input: AgentRunInput): Promise<AgentRunResult> {
-    // Lot 6: a correction packet replaces the task-derived prompt (it already
-    // carries the task framing and the workspace/git safety rules).
-    const prompt = input.correctionPacket ?? buildPrompt(input.task);
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    // A packet (correction or reviewer) replaces the task-derived prompt — it
+    // already carries the task framing and the workspace/git safety rules.
+    const prompt = input.promptOverride ?? buildPrompt(input.task);
     const lastMessageFile = path.join(tmpdir(), `conjunction-codex-${randomUUID()}.txt`);
+
+    // Lot 7: the reviewer runs read-only — the ONLY two sandbox values this
+    // adapter can ever emit are "workspace-write" (implementer) and
+    // "read-only" (reviewer). Never danger-full-access, never configurable.
+    const sandbox = input.readOnly === true ? "read-only" : SANDBOX_MODE;
+
+    // Optional structured-output schema (codex --output-schema <FILE>).
+    let schemaFile: string | undefined;
+    if (input.outputSchema !== undefined) {
+      schemaFile = path.join(tmpdir(), `conjunction-schema-${randomUUID()}.json`);
+      await writeFile(schemaFile, JSON.stringify(input.outputSchema), "utf8");
+    }
+
     const args = [
       "exec",
       "-C",
       input.workspacePath,
       "-s",
-      SANDBOX_MODE,
+      sandbox,
       "--ephemeral",
       "--color",
       "never",
       "-o",
       lastMessageFile,
+      ...(schemaFile !== undefined ? ["--output-schema", schemaFile] : []),
       ...(this.#model !== undefined ? ["-m", this.#model] : []),
       "--",
       prompt,
@@ -134,6 +148,9 @@ export class CodexAdapter implements AgentAdapter {
         }
         input.signal?.removeEventListener("abort", onAbort);
         void readLastMessage(lastMessageFile).then((lastMessage) => {
+          if (schemaFile !== undefined) {
+            void rm(schemaFile, { force: true }).catch(() => {});
+          }
           const result: AgentRunResult = { exitCode, timedOut, aborted };
           if (lastMessage !== undefined) {
             result.lastMessage = lastMessage;

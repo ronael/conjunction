@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 
@@ -212,6 +213,50 @@ describe("CodexAdapter.run behavior", () => {
     });
     expect(result.exitCode).toBeNull();
     expect(chunks.join("")).toContain("spawn codex ENOENT");
+  });
+});
+
+describe("CodexAdapter reviewer modes (lot 7)", () => {
+  it("readOnly maps to -s read-only and never workspace-write", async () => {
+    const fake = fakeSpawn((child) => child.exit(0));
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    await adapter.run({ ...baseInput, readOnly: true });
+    const args = fake.calls[0]?.args ?? [];
+    expect(args[args.indexOf("-s") + 1]).toBe("read-only");
+    expect(args.join(" ")).not.toContain("workspace-write");
+    expect(args.join(" ")).not.toContain("danger-full-access");
+  });
+
+  it("promptOverride replaces the task-derived prompt", async () => {
+    const fake = fakeSpawn((child) => child.exit(0));
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    await adapter.run({ ...baseInput, promptOverride: "THE PACKET" });
+    const args = fake.calls[0]?.args ?? [];
+    const prompt = args[args.indexOf("--") + 1];
+    expect(prompt).toBe("THE PACKET");
+    expect(prompt).not.toContain("## Objective");
+  });
+
+  it("outputSchema writes a temp schema file and passes --output-schema", async () => {
+    const schema = { type: "object", properties: { summary: { type: "string" } } };
+    let schemaContent = "";
+    const fake = fakeSpawn((child, args) => {
+      const file = args[args.indexOf("--output-schema") + 1] ?? "";
+      schemaContent = readFileSync(file, "utf8"); // still exists at spawn time
+      child.exit(0);
+    });
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    await adapter.run({ ...baseInput, outputSchema: schema });
+    const args = fake.calls[0]?.args ?? [];
+    expect(args).toContain("--output-schema");
+    expect(JSON.parse(schemaContent)).toEqual(schema);
+  });
+
+  it("omits --output-schema when no schema is given", async () => {
+    const fake = fakeSpawn((child) => child.exit(0));
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    await adapter.run(baseInput);
+    expect(fake.calls[0]?.args).not.toContain("--output-schema");
   });
 });
 

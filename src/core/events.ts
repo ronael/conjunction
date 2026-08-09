@@ -61,6 +61,22 @@ export interface CorrectionCompletedEvent
     EventBase<"correction.completed", { attemptIndex: number; failedCommands: string[] }>,
     RunScoped {}
 
+/** Finding counts by severity; `errored` marks an advisory reviewer failure. */
+export interface ReviewCompletedPayload {
+  total: number;
+  critical: number;
+  major: number;
+  minor: number;
+  nit: number;
+  errored: boolean;
+}
+
+export interface ReviewStartedEvent
+  extends EventBase<"review.started", Record<string, never>>, RunScoped {}
+
+export interface ReviewCompletedEvent
+  extends EventBase<"review.completed", ReviewCompletedPayload>, RunScoped {}
+
 export type ConjunctionEvent =
   | TaskCreatedEvent
   | RunStartedEvent
@@ -75,7 +91,9 @@ export type ConjunctionEvent =
   | RunCompletedEvent
   | RunCancelledEvent
   | CorrectionStartedEvent
-  | CorrectionCompletedEvent;
+  | CorrectionCompletedEvent
+  | ReviewStartedEvent
+  | ReviewCompletedEvent;
 
 export type ConjunctionEventType = ConjunctionEvent["type"];
 

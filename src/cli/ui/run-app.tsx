@@ -1,6 +1,9 @@
 import { Box, Text, useInput } from "ink";
 import React, { useEffect, useState, useSyncExternalStore } from "react";
 
+import type { ReviewFinding } from "../../core/index.js";
+import { findingsSummary } from "../format.js";
+
 import type { ChecklistStep, RunModel, VerifyItem } from "./run-model.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "┴", "⦦", "⦧", "⦇", "⦏"];
@@ -125,6 +128,18 @@ function InfoBox({ model, width }: { model: RunModel; width: number }) {
   );
 }
 
+function SeverityTag({ severity }: { severity: ReviewFinding["severity"] }) {
+  if (severity === "critical") {
+    return <Text color="red">[critical]</Text>;
+  }
+  if (severity === "major") {
+    return <Text color="yellow">[major]</Text>;
+  }
+  return <Text dimColor>[{severity}]</Text>;
+}
+
+const MAX_RENDERED_FINDINGS = 5;
+
 function FinalBox({ model, width }: { model: RunModel; width: number }) {
   const result = model.final;
   const state = model.finalState ?? "setup-error";
@@ -165,6 +180,27 @@ function FinalBox({ model, width }: { model: RunModel; width: number }) {
       {result !== undefined && result.run !== undefined && (
         <Kv k="Metadata" v={`${result.storeDir}/${result.run.id}.json`} />
       )}
+      {result?.run?.review !== undefined &&
+        (result.run.review.error !== undefined ? (
+          <Kv k="Review" v={<Text dimColor>unavailable (advisory)</Text>} />
+        ) : (
+          <>
+            <Kv k="Review" v={findingsSummary(result.run.review.findings)} />
+            {result.run.review.findings.slice(0, MAX_RENDERED_FINDINGS).map((finding, index) => (
+              <Text key={index}>
+                {"  "}• <SeverityTag severity={finding.severity} />{" "}
+                {finding.path !== undefined ? `${finding.path}: ` : ""}
+                {finding.message}
+              </Text>
+            ))}
+            {result.run.review.findings.length > MAX_RENDERED_FINDINGS && (
+              <Text dimColor>
+                {"  "}… +{result.run.review.findings.length - MAX_RENDERED_FINDINGS} more in the run
+                JSON
+              </Text>
+            )}
+          </>
+        ))}
       {result?.cleanupNote !== undefined && <Kv k="Cleanup" v={result.cleanupNote} />}
     </Box>
   );

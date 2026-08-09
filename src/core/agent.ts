@@ -18,10 +18,21 @@ export interface AgentRunInput {
   /** Streaming output; the orchestrator turns chunks into agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
   /**
-   * Lot 6 feedback loop: when set, this packet REPLACES the task-derived
-   * prompt (it already contains the task framing and workspace rules).
+   * When set, this packet REPLACES the task-derived prompt (correction packets
+   * and reviewer packets already carry the task framing and workspace rules).
    */
-  correctionPacket?: string;
+  promptOverride?: string;
+  /**
+   * Lot 7 reviewer mode: the runtime MUST run read-only (codex maps this to
+   * `-s read-only`). There is no way to request a less restrictive sandbox.
+   */
+  readOnly?: boolean;
+  /**
+   * Optional JSON Schema for the agent's final message (codex maps this to
+   * `--output-schema`). Runtimes without schema support ignore it; callers
+   * must parse defensively anyway.
+   */
+  outputSchema?: unknown;
 }
 
 export interface AgentRunResult {

@@ -36,3 +36,21 @@ export function stateSymbol(state: string): string {
 export function stateLabel(state: string): string {
   return state.toUpperCase();
 }
+
+/** "3 findings (1 major, 2 nit)" — shared by plain output and the TUI. */
+export function findingsSummary(
+  findings: readonly { severity: "critical" | "major" | "minor" | "nit" }[],
+): string {
+  const total = findings.length;
+  if (total === 0) {
+    return "no findings";
+  }
+  const parts = (["critical", "major", "minor", "nit"] as const)
+    .map((severity) => {
+      const count = findings.filter((finding) => finding.severity === severity).length;
+      return count > 0 ? `${count} ${severity}` : undefined;
+    })
+    .filter((part): part is string => part !== undefined)
+    .join(", ");
+  return `${total} finding${total === 1 ? "" : "s"} (${parts})`;
+}

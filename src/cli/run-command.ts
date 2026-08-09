@@ -1,7 +1,7 @@
 import path from "node:path";
 
-import type { AgentAdapter, Run, RunState, Task } from "../core/index.js";
-import { buildCorrectionPacket, Orchestrator } from "../core/index.js";
+import type { AgentAdapter, Run, RunReview, RunState, Task } from "../core/index.js";
+import { buildCorrectionPacket, buildReviewerPacket, Orchestrator } from "../core/index.js";
 import type {
   CommandResult,
   VerificationCommand,
@@ -12,11 +12,12 @@ import {
   createRunWorkspace,
   DirtyWorktreeError,
   findRepoRoot,
+  getWorktreeDiff,
   removeRunWorkspace,
 } from "../workspace/index.js";
 
 import { RunStore } from "./run-store.js";
-import { formatDuration } from "./format.js";
+import { findingsSummary, formatDuration } from "./format.js";
 
 /** Daytona-style checklist line for plain output: "✓ Workspace ready    <detail>". */
 function stepLine(symbol: string, label: string, detail?: string): string {
@@ -55,6 +56,11 @@ export interface RunTaskOptions {
    * same worker and re-verify. Meaningful only when verifyCommands is non-empty.
    */
   correct: boolean;
+  /**
+   * Lot 7: after the FINAL verification passes, run the independent read-only
+   * reviewer (advisory; findings never affect the exit code).
+   */
+  review: boolean;
 }
 
 /**
@@ -73,6 +79,10 @@ export interface RunObserver {
   commandFinished?(command: VerificationCommand, result: CommandResult): void;
   /** Verification failed and the single correction attempt is starting. */
   correctionStarted?(failedCommands: string[]): void;
+  /** Lot 7: the independent reviewer is starting. */
+  reviewStarted?(): void;
+  /** Lot 7: reviewer done (possibly with an advisory error). */
+  reviewFinished?(review: RunReview): void;
 }
 
 export interface RunTaskDeps {
@@ -207,7 +217,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       }
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
-      await orchestrator.verifyRun(run.id, { correction: options.correct });
+      await orchestrator.verifyRun(run.id, { correction: options.correct, review: options.review });
       observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
       await flush(task, run);
       if (hasVerify) {
@@ -254,7 +264,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
           out("\n── verification (attempt 2) ──\n");
           observer?.verificationStarted?.();
           // no correction option: the cap makes this outcome terminal
-          await orchestrator.verifyRun(run.id, { correction: false });
+          await orchestrator.verifyRun(run.id, { correction: false, review: options.review });
           observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
           await flush(task, run);
           out(
@@ -262,6 +272,41 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
               ? stepLine("✓", "Verification")
               : stepLine("✗", "Verification", `${failedVerifyNames()} failed`),
           );
+        }
+      }
+    }
+
+    // Lot 7: independent read-only reviewer, after the FINAL verification
+    // passed. Advisory: findings never affect the exit code.
+    if ((run.state as RunState) === "reviewing") {
+      out("\n── review ──\n");
+      observer?.reviewStarted?.();
+      const diff = run.workspacePath !== undefined ? await getWorktreeDiff(run.workspacePath) : "";
+      const packet = buildReviewerPacket({
+        task,
+        diff,
+        verification: (lastVerification?.results ?? []).map((result) => ({
+          name: result.name,
+          passed: !result.timedOut && result.exitCode === 0,
+        })),
+      });
+      await orchestrator.reviewRun(run.id, packet, executeOptions);
+      await flush(task, run);
+
+      const review = run.review;
+      if (review !== undefined) {
+        observer?.reviewFinished?.(review);
+        if (review.error !== undefined) {
+          out(stepLine("•", "Review", `unavailable (advisory): ${review.error}`));
+        } else {
+          out(stepLine("✓", "Review", findingsSummary(review.findings)));
+          for (const finding of review.findings.slice(0, 10)) {
+            const location = finding.path !== undefined ? `${finding.path}: ` : "";
+            out(`  • [${finding.severity}] ${location}${finding.message}\n`);
+          }
+          if (review.findings.length > 10) {
+            out(`  … +${review.findings.length - 10} more in the run JSON\n`);
+          }
         }
       }
     }
@@ -299,6 +344,16 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     } else {
       out(`Verify:    ${lastVerification.passed ? "passed" : "FAILED"}\n`);
     }
+  }
+  if (run.review !== undefined) {
+    const review = run.review;
+    out(
+      `Review:    ${
+        review.error !== undefined
+          ? `unavailable (advisory): ${review.error}`
+          : findingsSummary(review.findings)
+      }\n`,
+    );
   }
   const metadataPath = path.join(store.dir, `${run.id}.json`);
   out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);

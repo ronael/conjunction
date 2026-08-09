@@ -73,6 +73,8 @@ export async function runWithTui(
       commandStarted: (command) => model.commandStarted(command),
       commandFinished: (_command, commandResult) => model.commandFinished(commandResult),
       correctionStarted: (failedCommands) => model.startCorrection(failedCommands),
+      reviewStarted: () => model.startReview(),
+      reviewFinished: (review) => model.finishReview(review),
     },
   });
 

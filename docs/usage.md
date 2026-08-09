@@ -54,6 +54,15 @@ Options:
   is refused (and the worktree preserved) when it has uncommitted changes.
 - `--plain` — force plain text output (no TUI), same as piping/CI behavior.
 - `--no-correct` — disable the correction loop (see below).
+- `--review` — after the final verification passes, run an independent
+  READ-ONLY reviewer (a second agent invocation against the same worktree).
+  Findings are structured (`critical`/`major`/`minor`/`nit` + path +
+  suggestion), advisory only — they never change the exit code and never
+  trigger another correction. A reviewer crash is logged as
+  `unavailable (advisory)` and the run still completes. Works without
+  `--verify`. Plain output prints `✓ Review   2 findings (1 major, 1 nit)`
+  plus indented finding lines; the TUI adds a `Review` checklist step and
+  renders the top 5 findings in the final box (full findings in the run JSON).
 
 ## Correction loop (lot 6)
 

@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 
 import type { AgentAdapter, AgentRunInput, AgentRunResult } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
-import { transitionRun, type Attempt, type Run, type VerificationOutcome } from "./run.js";
+import { parseReviewReport, REVIEW_OUTPUT_SCHEMA } from "./review.js";
+import {
+  transitionRun,
+  type AgentAttemptOutcome,
+  type Attempt,
+  type Run,
+  type VerificationOutcome,
+} from "./run.js";
 import { createTask, type Task, type TaskInput } from "./task.js";
 
 /** Lot 6: hard cap on self-healing. One correction attempt per run, ever. */
@@ -256,7 +263,7 @@ export class Orchestrator {
       input.signal = options.signal;
     }
     if (correctionPacket !== undefined) {
-      input.correctionPacket = correctionPacket;
+      input.promptOverride = correctionPacket;
     }
 
     const result = await this.deps.agent.run(input);
@@ -332,8 +339,14 @@ export class Orchestrator {
    * Lot 6: with `{ correction: true }`, a failed verification transitions to
    * "correcting" instead of "failed" — exactly once per run. After the
    * correction attempt, call verifyRun again (the cap then forces terminal).
+   *
+   * Lot 7: with `{ review: true }`, a PASSED verification transitions to
+   * "reviewing" instead of "completed"; call reviewRun next.
    */
-  async verifyRun(runId: string, options?: { correction?: boolean }): Promise<Run> {
+  async verifyRun(
+    runId: string,
+    options?: { correction?: boolean; review?: boolean },
+  ): Promise<Run> {
     const run = this.#requireRun(runId);
     const task = this.#requireTask(run.taskId);
     if (!this.deps.verification) {
@@ -357,6 +370,10 @@ export class Orchestrator {
         runId: run.id,
         payload: {},
       });
+      if (options?.review === true) {
+        transitionRun(run, "reviewing", this.#timestamp());
+        return run;
+      }
       transitionRun(run, "completed", this.#timestamp());
       task.status = "completed";
       this.#emit({
@@ -400,6 +417,119 @@ export class Orchestrator {
     return run;
   }
 
+  /**
+   * Lot 7: the independent reviewer — a second, READ-ONLY invocation of the
+   * same adapter against the same worktree, after the final verification
+   * passed (run must be in state "reviewing", i.e. verifyRun with
+   * `{ review: true }`).
+   *
+   * The reviewer is advisory: a reviewer crash/timeout NEVER fails the run —
+   * it is recorded on `run.review.error` and the run completes. Findings
+   * never feed the correction loop. Abort (q / Ctrl-C) cancels the run.
+   */
+  async reviewRun(runId: string, packet: string, options: ExecuteRunOptions): Promise<Run> {
+    const run = this.#requireRun(runId);
+    const task = this.#requireTask(run.taskId);
+    if (!this.deps.agent) {
+      throw new MissingDependencyError("agent");
+    }
+    if (run.state !== "reviewing") {
+      throw new RunNotExecutableError(`state must be "reviewing", got "${run.state}"`);
+    }
+    if (run.workspacePath === undefined) {
+      throw new RunNotExecutableError(
+        "run has no workspace (startRun without a workspace provider)",
+      );
+    }
+
+    this.#emit({ type: "review.started", taskId: run.taskId, runId: run.id, payload: {} });
+    this.#emit({
+      type: "agent.started",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: { runtime: run.runtime },
+    });
+
+    const input: AgentRunInput = {
+      task,
+      workspacePath: run.workspacePath,
+      timeoutMs: options.timeoutMs,
+      promptOverride: packet,
+      readOnly: true, // hard rule: the reviewer NEVER gets write access
+      outputSchema: REVIEW_OUTPUT_SCHEMA,
+      onOutput: (chunk, stream) => {
+        this.#emit({
+          type: "agent.output",
+          taskId: run.taskId,
+          runId: run.id,
+          payload: { stream, chunk },
+        });
+        options.onOutput?.(chunk, stream);
+      },
+    };
+    if (options.signal !== undefined) {
+      input.signal = options.signal;
+    }
+
+    const result = await this.deps.agent.run(input);
+    const agentResult: AgentAttemptOutcome = {
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      aborted: result.aborted,
+    };
+    this.#emit({
+      type: "agent.completed",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: { exitCode: result.exitCode },
+    });
+
+    if (result.aborted) {
+      this.cancelRun(run.id, "review aborted");
+      return run;
+    }
+
+    const counts = { total: 0, critical: 0, major: 0, minor: 0, nit: 0, errored: false };
+    if (result.timedOut || result.exitCode !== 0) {
+      const error = result.timedOut
+        ? `reviewer timed out after ${options.timeoutMs}ms`
+        : `reviewer exited with code ${result.exitCode ?? "null (killed)"}`;
+      run.review = {
+        summary: "",
+        findings: [],
+        structured: false,
+        completedAt: this.#timestamp(),
+        agentResult,
+        error,
+      };
+      counts.errored = true;
+    } else {
+      const parsed = parseReviewReport(result.lastMessage ?? "");
+      run.review = {
+        summary: parsed.report.summary,
+        findings: parsed.report.findings,
+        structured: parsed.structured,
+        completedAt: this.#timestamp(),
+        agentResult,
+      };
+      counts.total = parsed.report.findings.length;
+      for (const finding of parsed.report.findings) {
+        counts[finding.severity]++;
+      }
+    }
+    this.#emit({
+      type: "review.completed",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: counts,
+    });
+
+    transitionRun(run, "completed", this.#timestamp());
+    task.status = "completed";
+    this.#emit({ type: "run.completed", taskId: run.taskId, runId: run.id, payload: {} });
+    return run;
+  }
+
   #requireTask(taskId: string): Task {
     const task = this.#tasks.get(taskId);
     if (!task) {
@@ -407,7 +537,6 @@ export class Orchestrator {
     }
     return task;
   }
-
   #requireRun(runId: string): Run {
     const run = this.#runs.get(runId);
     if (!run) {

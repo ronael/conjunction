@@ -1,9 +1,9 @@
-import type { Run, RunState, Task } from "../../core/index.js";
-import { formatDuration } from "../format.js";
+import type { Run, RunReview, RunState, Task } from "../../core/index.js";
+import { findingsSummary, formatDuration } from "../format.js";
 import type { CommandResult, VerificationCommand } from "../../verification/index.js";
 import type { RunTaskResult } from "../run-command.js";
 
-export type RunPhase = "setup" | "agent" | "verification" | "correcting" | "done";
+export type RunPhase = "setup" | "agent" | "verification" | "correcting" | "review" | "done";
 
 export interface OutputLine {
   stream: "stdout" | "stderr" | "system";
@@ -193,6 +193,24 @@ export class RunModel {
       `── correction attempt 2/2: fixing failed verification (${failedCommands.join(", ")}) ──\n`,
       "system",
     );
+    this.#emit();
+  }
+
+  /** Lot 7: the independent reviewer is starting. */
+  startReview(): void {
+    this.phase = "review";
+    this.#startStep({ id: "review", label: "Review" });
+    this.#emit();
+  }
+
+  /** Lot 7: reviewer finished (possibly with an advisory error). */
+  finishReview(review: RunReview): void {
+    if (review.error !== undefined) {
+      // advisory failure is not a run failure — keep the step green
+      this.#completeStep("review", "unavailable (advisory)");
+    } else {
+      this.#completeStep("review", findingsSummary(review.findings));
+    }
     this.#emit();
   }
 
