@@ -7,13 +7,9 @@ export async function doctorCommand(
 ): Promise<number> {
   const availability = await adapter.detect();
   if (availability.available) {
-    out(
-      `agent runtime "${adapter.id}": available (${availability.version ?? "unknown version"})\n`,
-    );
+    out(`✓ ${adapter.id} — available (${availability.version ?? "unknown version"})\n`);
     return 0;
   }
-  out(
-    `agent runtime "${adapter.id}": NOT available — ${availability.reason ?? "unknown reason"}\n`,
-  );
+  out(`✗ ${adapter.id} — not available: ${availability.reason ?? "unknown reason"}\n`);
   return 1;
 }

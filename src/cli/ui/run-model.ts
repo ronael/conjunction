@@ -1,4 +1,5 @@
 import type { Run, RunState, Task } from "../../core/index.js";
+import { formatDuration } from "../format.js";
 import type { CommandResult, VerificationCommand } from "../../verification/index.js";
 import type { RunTaskResult } from "../run-command.js";
 
@@ -18,6 +19,17 @@ export interface VerifyItem {
   durationMs?: number;
   /** Last lines of stderr, kept only for failed commands. */
   stderrTail?: string[];
+}
+
+export type StepStatus = "pending" | "active" | "done" | "failed";
+
+/** One row of the Daytona-style phase checklist. */
+export interface ChecklistStep {
+  id: string;
+  label: string;
+  status: StepStatus;
+  /** Right-aligned dim detail: branch, duration, "typecheck failed", … */
+  detail?: string;
 }
 
 /** Ring-buffer cap so a long run cannot grow memory without bound. */
@@ -40,6 +52,11 @@ export class RunModel {
   readonly startedAt = Date.now();
   finalState: RunState | "setup-error" | undefined;
   final: RunTaskResult | undefined;
+
+  /** Daytona-style phase checklist, filled in as the run progresses. */
+  steps: ChecklistStep[] = [{ id: "workspace", label: "Workspace ready", status: "active" }];
+  #stepStartedAt = new Map<string, number>([["workspace", Date.now()]]);
+  #verifyRound = 0;
 
   /** Pre-seeded by the caller from the configured verify commands. */
   verifyItems: VerifyItem[] = [];
@@ -79,6 +96,15 @@ export class RunModel {
     return this.#partial === undefined ? this.#lines : [...this.#lines, this.#partial];
   }
 
+  get contextReady(): boolean {
+    return this.runId.length > 0;
+  }
+
+  /** Id of the checklist step the verifyItems currently belong to. */
+  get currentVerifyStepId(): string {
+    return `verification-${this.#verifyRound}`;
+  }
+
   setContext(ctx: { run: Run; task: Task; repoRoot: string; storeDir: string }): void {
     this.runId = ctx.run.id;
     this.taskTitle = ctx.task.title;
@@ -86,6 +112,9 @@ export class RunModel {
     this.worktreePath = ctx.run.workspacePath ?? "";
     this.storeDir = ctx.storeDir;
     this.phase = "agent";
+
+    this.#completeStep("workspace", this.branch);
+    this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
     this.#emit();
   }
 
@@ -123,14 +152,43 @@ export class RunModel {
 
   startVerification(): void {
     this.phase = "verification";
+    this.#verifyRound++;
+    this.#completeStep(this.#verifyRound === 1 ? "agent-1" : "agent-2");
+    // skip the verification step entirely when nothing is configured
+    if (this.verifyItems.length > 0) {
+      this.#startStep({
+        id: `verification-${this.#verifyRound}`,
+        label: this.#verifyRound === 1 ? "Verification" : "Verification (attempt 2)",
+      });
+    }
     // reset for a fresh pass (initial run or the post-correction re-check)
     this.verifyItems = this.verifyItems.map((item) => ({ name: item.name, status: "pending" }));
+    this.#emit();
+  }
+
+  /** Verification finished; resolves the verification step's status/detail. */
+  verificationFinished(passed: boolean): void {
+    const step = this.steps.find(
+      (candidate) => candidate.id === `verification-${this.#verifyRound}`,
+    );
+    if (step === undefined) {
+      return;
+    }
+    if (passed) {
+      this.#completeStep(step.id);
+    } else {
+      const failedNames = this.verifyItems
+        .filter((item) => item.status === "failed" || item.status === "timed-out")
+        .map((item) => item.name);
+      this.#failStep(step.id, `${failedNames.join(", ")} failed`);
+    }
     this.#emit();
   }
 
   /** Lot 6: verification failed; the single correction attempt is starting. */
   startCorrection(failedCommands: readonly string[]): void {
     this.phase = "correcting";
+    this.#startStep({ id: "agent-2", label: "Correction (attempt 2)" });
     this.appendOutput(
       `── correction attempt 2/2: fixing failed verification (${failedCommands.join(", ")}) ──\n`,
       "system",
@@ -169,6 +227,16 @@ export class RunModel {
     this.phase = "done";
     this.final = result;
     this.finalState = result.run?.state ?? "setup-error";
+    // resolve any step still open (agent failure, cancel mid-flight, …)
+    for (const step of this.steps) {
+      if (step.status === "active" || step.status === "pending") {
+        if (this.finalState === "completed") {
+          this.#completeStep(step.id);
+        } else {
+          this.#failStep(step.id, this.finalState === "cancelled" ? "cancelled" : "failed");
+        }
+      }
+    }
     this.#emit();
   }
 
@@ -205,5 +273,33 @@ export class RunModel {
     this.follow = true;
     this.scrollOffset = 0;
     this.#emit();
+  }
+
+  #startStep(step: { id: string; label: string }): void {
+    this.steps.push({ ...step, status: "active" });
+    this.#stepStartedAt.set(step.id, Date.now());
+  }
+
+  #completeStep(id: string, detail?: string): void {
+    const step = this.steps.find((candidate) => candidate.id === id);
+    if (step === undefined) {
+      return;
+    }
+    step.status = "done";
+    const started = this.#stepStartedAt.get(id);
+    const resolved =
+      detail ?? (started === undefined ? undefined : formatDuration(Date.now() - started));
+    if (resolved !== undefined) {
+      step.detail = resolved;
+    }
+  }
+
+  #failStep(id: string, detail: string): void {
+    const step = this.steps.find((candidate) => candidate.id === id);
+    if (step === undefined) {
+      return;
+    }
+    step.status = "failed";
+    step.detail = detail;
   }
 }

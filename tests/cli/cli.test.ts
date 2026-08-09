@@ -114,10 +114,14 @@ describe("cli run (stub adapter, real git repo)", () => {
 
     // summary mentions the key facts
     const text = io.text();
-    expect(text).toContain("state:    completed");
+    expect(text).toContain("State:     COMPLETED");
     expect(text).toContain(`conjunction/${runId}`);
-    expect(text).toContain("test -f hello.txt: exit 0");
+    expect(text).toContain("✓ test -f hello.txt");
     expect(text).toContain("created hello.txt");
+    // daytona-style checklist lines
+    expect(text).toContain("✓ Workspace ready");
+    expect(text).toContain("✓ Agent (attempt 1)");
+    expect(text).toContain("✓ Verification");
   });
 
   it("fails (exit 1) when verification fails, run state recorded as failed", async () => {
@@ -128,8 +132,10 @@ describe("cli run (stub adapter, real git repo)", () => {
       out: io.out,
     });
     expect(code).toBe(1);
-    expect(io.text()).toContain("verify:   FAILED");
-    expect(io.text()).toContain("state:    failed");
+    expect(io.text()).toContain("Verify:    FAILED");
+    expect(io.text()).toContain("State:     FAILED");
+    expect(io.text()).toContain("✗ Verification");
+    expect(io.text()).toContain("✗ false exit 1");
   });
 
   it("fails (exit 1) when the agent exits non-zero", async () => {
@@ -152,7 +158,9 @@ describe("cli run (stub adapter, real git repo)", () => {
       out: io.out,
     });
     expect(code).toBe(0);
-    expect(io.text()).toContain("vacuous pass");
+    expect(io.text()).toContain("no verification commands configured");
+    // no verification checklist line/section without --verify
+    expect(io.text()).not.toContain("── verification ──");
   });
 
   it("--cleanup refuses to remove the dirty worktree and preserves it", async () => {
@@ -163,7 +171,7 @@ describe("cli run (stub adapter, real git repo)", () => {
       out: io.out,
     });
     expect(code).toBe(0);
-    expect(io.text()).toContain("cleanup:  refused");
+    expect(io.text()).toContain("Cleanup:   refused");
     const [runId] = await storedRunIds(repo);
     const worktree = path.join(repo, ".conjunction", "worktrees", runId ?? "");
     expect(await readFile(path.join(worktree, "hello.txt"), "utf8")).toBe("hello conjunction\n");
@@ -189,9 +197,9 @@ describe("cli run (stub adapter, real git repo)", () => {
       out: io.out,
     });
     expect(code).toBe(0);
-    expect(io.text()).toContain("--- agent output ---");
-    expect(io.text()).toContain("--- summary ---");
-    expect(io.text()).toContain("state:    completed");
+    expect(io.text()).toContain("── agent output ──");
+    expect(io.text()).toContain("── summary ──");
+    expect(io.text()).toContain("State:     COMPLETED");
   });
 
   it("lot 6: failed verify triggers one correction attempt, then completes", async () => {
@@ -221,11 +229,12 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(packets[1]).toContain("create good.txt"); // original objective carried over
 
     const text = io.text();
-    expect(text).toContain("--- correction (attempt 2/2) ---");
+    expect(text).toContain("── correction (attempt 2/2) ──");
     expect(text).toContain("verification failed for: test -f good.txt");
-    expect(text).toContain("--- verification (attempt 2) ---");
-    expect(text).toContain("attempts: 2 (initial + correction)");
-    expect(text).toContain("state:    completed");
+    expect(text).toContain("── verification (attempt 2) ──");
+    expect(text).toContain("✓ Correction (attempt 2)");
+    expect(text).toContain("Attempts:  2 (initial + correction)");
+    expect(text).toContain("State:     COMPLETED");
 
     // both attempts persisted in the run JSON
     const [runId] = await storedRunIds(repo);
@@ -261,7 +270,7 @@ describe("cli run (stub adapter, real git repo)", () => {
 
     expect(code).toBe(1);
     expect(agentCalls).toBe(1);
-    expect(io.text()).toContain("state:    failed");
+    expect(io.text()).toContain("State:     FAILED");
     expect(io.text()).not.toContain("correction");
     const [runId] = await storedRunIds(repo);
     const stored = JSON.parse(
@@ -286,7 +295,7 @@ describe("cli run (stub adapter, real git repo)", () => {
 
     expect(code).toBe(1);
     expect(agentCalls).toBe(2); // initial + the single correction, never a third
-    expect(io.text()).toContain("state:    failed");
+    expect(io.text()).toContain("State:     FAILED");
     const [runId] = await storedRunIds(repo);
     const stored = JSON.parse(
       await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
@@ -321,7 +330,7 @@ describe("cli run (stub adapter, real git repo)", () => {
     const result = await promise;
     expect(result.exitCode).toBe(1);
     expect(result.run?.state).toBe("cancelled");
-    expect(io.text()).toContain("state:    cancelled");
+    expect(io.text()).toContain("State:     CANCELLED");
     // metadata on disk also records the cancellation
     const [runId] = await storedRunIds(repo);
     const stored = JSON.parse(
@@ -343,9 +352,12 @@ describe("cli status / doctor / usage", () => {
     const io = capture();
     const code = await cli(["status", "--repo", repo], { out: io.out });
     expect(code).toBe(0);
-    expect(io.text()).toContain("completed");
+    expect(io.text()).toContain("✓");
+    expect(io.text()).toContain("COMPLETED");
     expect(io.text()).toContain("stub-agent");
     expect(io.text()).toContain("create hello.txt");
+    expect(io.text()).toContain("Branch");
+    expect(io.text()).toContain("Worktree");
   });
 
   it("status on a repo without runs prints a friendly message", async () => {
@@ -358,7 +370,7 @@ describe("cli status / doctor / usage", () => {
   it("doctor reports adapter availability", async () => {
     const io = capture();
     expect(await cli(["doctor"], { adapter: fileCreatingStub, out: io.out })).toBe(0);
-    expect(io.text()).toContain("available");
+    expect(io.text()).toContain("✓ stub-agent — available");
 
     const down: AgentAdapter = {
       id: "stub-agent",
@@ -367,7 +379,7 @@ describe("cli status / doctor / usage", () => {
     };
     const io2 = capture();
     expect(await cli(["doctor"], { adapter: down, out: io2.out })).toBe(1);
-    expect(io2.text()).toContain("NOT available");
+    expect(io2.text()).toContain("✗ stub-agent — not available: not installed");
   });
 
   it("prints usage and exit 2 for unknown commands and missing description", async () => {

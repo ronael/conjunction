@@ -69,6 +69,7 @@ export async function runWithTui(
       context: (ctx) => model.setContext(ctx),
       agentOutput: (chunk, stream) => model.appendOutput(chunk, stream),
       verificationStarted: () => model.startVerification(),
+      verificationFinished: (passed) => model.verificationFinished(passed),
       commandStarted: (command) => model.commandStarted(command),
       commandFinished: (_command, commandResult) => model.commandFinished(commandResult),
       correctionStarted: (failedCommands) => model.startCorrection(failedCommands),

@@ -71,35 +71,53 @@ worktree:
 
 Both attempts are recorded on the run (`attempts` in the run JSON, plus
 `correction.started` / `correction.completed` events). Plain output marks the
-boundary with `--- correction (attempt 2/2) ---`; the TUI shows a
-`CORRECTING (attempt 2/2)` phase. `--no-correct` disables the loop; without
-`--verify` there is nothing to correct against and no correction happens.
+boundary with `── correction (attempt 2/2) ──`; the TUI adds a
+`Correction (attempt 2)` checklist step. `--no-correct` disables the loop;
+without `--verify` there is nothing to correct against and no correction
+happens.
 
 ## Interactive TUI
 
 When stdout is a terminal, `run` renders an Ink-based TUI instead of plain
-text (pipes, CI and `--plain` get the plain output):
+text (pipes, CI and `--plain` get the plain output). The visual style follows
+the Daytona CLI: a vertical step checklist, rounded key-value boxes, a
+restrained palette (green ✓, red ✗, dim gray for secondary text) and plenty
+of breathing room:
 
 ```
-┌ Conjunction ─ run a1b2c3d4 ─ task: "add a dark-mode toggle"
-│ state: RUNNING (agent)   elapsed 01:23   branch conjunction/a1b2c3d4
-├ Agent output (autoscroll)
-│ …streamed agent stdout; stderr dimmed…
-├ Verification
-│ ● typecheck  ✓ 1.2s
-│ ● test        ⠋ running
-└ q / Ctrl-C: cancel run · ↑/↓: scroll
+╭────────────────────────────────────────────╮
+│  Task      add a dark-mode toggle          │
+│  Run       a1b2c3d4                        │
+│  Branch    conjunction/a1b2c3d4            │
+│  Worktree  …/.conjunction/worktrees/a1b2…  │
+│  Verify    typecheck · test                │
+╰────────────────────────────────────────────╯
+
+✓ Workspace ready          conjunction/a1b2c3d4
+⠋ Agent (attempt 1)
+
+── agent output ──
+…streamed agent stdout; stderr dimmed…
+
+elapsed 01:23 · q / Ctrl-C: cancel · ↑/↓: scroll
 ```
 
-- Header: short run id, truncated task title, phase, elapsed time, branch.
+- Info box: run metadata (task, run, branch, worktree, verify commands).
+- Checklist: one step per phase — workspace, agent (per attempt),
+  verification (per round), correction (only if it happens). Done = green ✓
+  with a dim detail (branch, duration), active = spinner, failed = red ✗ with
+  the failed command names. Per-command verify results appear indented under
+  the verification step.
 - Agent output: streamed, auto-following; ↑/↓ (or PageUp/PageDown) scrolls —
   scrolling up pauses follow, scrolling back to the end resumes it. Output is
-  capped at a 2,000-line ring buffer (dropped lines are counted in the pane
-  header).
-- Verification: per-command spinner → ✓ (duration) / ✗ (exit code), with the
-  tail of stderr shown for failures.
-- Final panel: COMPLETED / FAILED / CANCELLED with worktree, branch,
-  verification recap, cleanup outcome and the metadata path.
+  capped at a 2,000-line ring buffer (dropped lines counted in the label).
+- Final box: big colored COMPLETED / FAILED / CANCELLED state with attempts,
+  worktree, verification recap, cleanup outcome and the metadata path.
+
+The plain (non-TTY) output uses the same vocabulary without borders: ✓/✗
+checklist lines as steps complete, per-command verify lines as they finish,
+and an aligned key-value summary. `conjunction status` and
+`conjunction doctor` use the same ✓/✗/■ symbols.
 
 Keys: `q` or `Ctrl-C` cancels the run gracefully while running (the agent
 process group is killed via the AbortSignal path; a second Ctrl-C in plain

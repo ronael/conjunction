@@ -1,12 +1,13 @@
 import { Box, Text, useInput } from "ink";
 import React, { useEffect, useState, useSyncExternalStore } from "react";
 
-import type { RunModel, VerifyItem } from "./run-model.js";
+import type { ChecklistStep, RunModel, VerifyItem } from "./run-model.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "┴", "⦦", "⦧", "⦇", "⦏"];
 const DEFAULT_TERMINAL_ROWS = 24;
-/** Header + section chrome lines not available to the output pane. */
-const CHROME_LINES = 8;
+const DEFAULT_TERMINAL_COLUMNS = 80;
+/** Lines reserved for info box, checklist, pane label and footer. */
+const CHROME_LINES = 16;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -19,63 +20,115 @@ function formatElapsed(startedAt: number, now: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function phaseLabel(model: RunModel): string {
-  switch (model.phase) {
-    case "setup":
-      return "STARTING (workspace)";
-    case "agent":
-      return "RUNNING (agent)";
-    case "verification":
-      return "VERIFYING";
-    case "correcting":
-      return "CORRECTING (attempt 2/2)";
-    case "done":
-      return (model.finalState ?? "unknown").toUpperCase();
-  }
-}
-
 function shortId(runId: string): string {
   return runId.length > 0 ? runId.slice(0, 8) : "……";
 }
 
-function VerifyLine({ item, spinner }: { item: VerifyItem; spinner: string }): React.JSX.Element {
-  let status: React.JSX.Element;
-  switch (item.status) {
-    case "pending":
-      status = <Text dimColor>pending</Text>;
-      break;
-    case "running":
-      status = <Text> {spinner} running</Text>;
-      break;
-    case "passed":
-      status = <Text color="green"> ✓ {((item.durationMs ?? 0) / 1000).toFixed(1)}s</Text>;
-      break;
-    case "failed":
-      status = <Text color="red"> ✗ exit {item.exitCode ?? "null"}</Text>;
-      break;
-    case "timed-out":
-      status = <Text color="red"> ✗ timed out</Text>;
-      break;
-  }
+/** Dim key, bright value — the Daytona key-value row. */
+function Kv({ k, v }: { k: string; v: React.ReactNode }): React.JSX.Element {
   return (
-    <Box flexDirection="column">
-      <Text>
-        {"│ "}● {item.name}
-        {status}
+    <Text>
+      <Text dimColor>{k.padEnd(10)}</Text>
+      {v}
+    </Text>
+  );
+}
+
+function StepIcon({ status, spinner }: { status: ChecklistStep["status"]; spinner: string }) {
+  switch (status) {
+    case "done":
+      return <Text color="green">✓</Text>;
+    case "failed":
+      return <Text color="red">✗</Text>;
+    case "active":
+      return <Text>{spinner}</Text>;
+    case "pending":
+      return <Text dimColor>•</Text>;
+  }
+}
+
+function StepRow({
+  step,
+  spinner,
+  width,
+}: {
+  step: ChecklistStep;
+  spinner: string;
+  width: number;
+}) {
+  return (
+    <Box width={width} justifyContent="space-between">
+      <Text dimColor={step.status === "pending"}>
+        <StepIcon status={step.status} spinner={spinner} /> {step.label}
       </Text>
-      {item.stderrTail?.map((line, index) => (
-        <Text key={index} dimColor>
-          {"│   "}⎿ {line}
-        </Text>
-      ))}
+      {step.detail !== undefined && <Text dimColor>{step.detail}</Text>}
     </Box>
   );
 }
 
-function FinalPanel({ model }: { model: RunModel }): React.JSX.Element {
+function VerifyItemRow({ item, spinner }: { item: VerifyItem; spinner: string }) {
+  switch (item.status) {
+    case "pending":
+      return (
+        <Text dimColor>
+          {"   "}• {item.name}
+        </Text>
+      );
+    case "running":
+      return (
+        <Text>
+          {"   "}
+          {spinner} {item.name}
+        </Text>
+      );
+    case "passed":
+      return (
+        <Text>
+          {"   "}
+          <Text color="green">✓</Text> {item.name}
+          <Text dimColor> {((item.durationMs ?? 0) / 1000).toFixed(1)}s</Text>
+        </Text>
+      );
+    case "failed":
+    case "timed-out":
+      return (
+        <Box flexDirection="column">
+          <Text>
+            {"   "}
+            <Text color="red">✗</Text> {item.name}
+            <Text dimColor>
+              {" "}
+              {item.status === "timed-out" ? "timed out" : `exit ${item.exitCode ?? "null"}`}
+            </Text>
+          </Text>
+          {item.stderrTail?.map((line, index) => (
+            <Text key={index} dimColor>
+              {"     "}⎿ {line}
+            </Text>
+          ))}
+        </Box>
+      );
+  }
+}
+
+function InfoBox({ model, width }: { model: RunModel; width: number }) {
+  const verifyNames =
+    model.verifyItems.length > 0 ? model.verifyItems.map((item) => item.name).join(" · ") : "none";
+  return (
+    <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
+      <Kv k="Task" v={truncate(model.taskTitle, width - 20)} />
+      <Kv k="Run" v={shortId(model.runId)} />
+      <Kv k="Branch" v={model.branch} />
+      <Kv k="Worktree" v={model.worktreePath} />
+      <Kv k="Verify" v={verifyNames} />
+    </Box>
+  );
+}
+
+function FinalBox({ model, width }: { model: RunModel; width: number }) {
   const result = model.final;
   const state = model.finalState ?? "setup-error";
-  const headline =
+  const stateNode =
     state === "completed" ? (
       <Text color="green">✓ COMPLETED</Text>
     ) : state === "cancelled" ? (
@@ -85,54 +138,34 @@ function FinalPanel({ model }: { model: RunModel }): React.JSX.Element {
     );
 
   return (
-    <Box flexDirection="column">
-      <Text>{"├"} Result</Text>
-      <Text>
-        {"│ "} {headline}
-      </Text>
+    <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
+      <Kv k="State" v={stateNode} />
       {result?.run !== undefined && result.run.attempts.length > 0 && (
-        <Text>
-          {"│ "} attempts: {result.run.attempts.length}
-          {result.run.attempts.length > 1 ? " (initial + correction)" : ""}
-        </Text>
+        <Kv
+          k="Attempts"
+          v={`${result.run.attempts.length}${result.run.attempts.length > 1 ? " (initial + correction)" : ""}`}
+        />
       )}
-      {result?.run?.branch !== undefined && (
-        <Text>
-          {"│ "} branch: {result.run?.branch}
-        </Text>
-      )}
-      {result?.run?.workspacePath !== undefined && (
-        <Text>
-          {"│ "} worktree: {result.run?.workspacePath}
-        </Text>
-      )}
+      {result?.run?.branch !== undefined && <Kv k="Branch" v={result.run.branch} />}
+      {result?.run?.workspacePath !== undefined && <Kv k="Worktree" v={result.run.workspacePath} />}
       {result?.run?.result?.error !== undefined && (
-        <Text color="red">
-          {"│ "} error: {result.run.result.error}
-        </Text>
+        <Kv k="Error" v={<Text color="red">{result.run.result.error}</Text>} />
       )}
       {result?.verification !== undefined &&
         (result.verification.results.length === 0 ? (
-          <Text dimColor>{"│ "} verify: no verification commands configured</Text>
+          <Kv k="Verify" v={<Text dimColor>no verification commands configured</Text>} />
         ) : (
-          <Text>
-            {"│ "} verify: {result.verification.passed ? "passed" : "FAILED"} (
-            {result.verification.results
+          <Kv
+            k="Verify"
+            v={`${result.verification.passed ? "passed" : "FAILED"} (${result.verification.results
               .map((r) => `${r.name} ${r.timedOut ? "timeout" : r.exitCode === 0 ? "✓" : "✗"}`)
-              .join(", ")}
-            )
-          </Text>
+              .join(", ")})`}
+          />
         ))}
       {result !== undefined && result.run !== undefined && (
-        <Text dimColor>
-          {"│ "} metadata: {result.storeDir}/{result.run.id}.json (+ .events.jsonl)
-        </Text>
+        <Kv k="Metadata" v={`${result.storeDir}/${result.run.id}.json`} />
       )}
-      {result?.cleanupNote !== undefined && (
-        <Text dimColor>
-          {"│ "} {result.cleanupNote.trim()}
-        </Text>
-      )}
+      {result?.cleanupNote !== undefined && <Kv k="Cleanup" v={result.cleanupNote} />}
     </Box>
   );
 }
@@ -145,6 +178,8 @@ export interface RunAppProps {
   onQuit: () => void;
   /** Output pane height; defaults to terminal rows minus chrome. */
   viewportHeight?: number;
+  /** Content width; defaults to terminal columns (capped). */
+  width?: number;
 }
 
 export function RunApp({
@@ -152,6 +187,7 @@ export function RunApp({
   onCancel,
   onQuit,
   viewportHeight,
+  width,
 }: RunAppProps): React.JSX.Element {
   useSyncExternalStore(model.subscribe, model.getVersion);
   const [tick, setTick] = useState(0);
@@ -160,6 +196,8 @@ export function RunApp({
     return () => clearInterval(interval);
   }, []);
 
+  const contentWidth =
+    width ?? Math.min(76, (process.stdout.columns ?? DEFAULT_TERMINAL_COLUMNS) - 2);
   const height =
     viewportHeight ?? Math.max(4, (process.stdout.rows ?? DEFAULT_TERMINAL_ROWS) - CHROME_LINES);
   const spinner = SPINNER_FRAMES[tick % SPINNER_FRAMES.length] ?? "⠋";
@@ -186,41 +224,44 @@ export function RunApp({
   });
 
   const visible = model.visibleLines(height);
+  const blankLines = Math.max(0, height - visible.length);
 
   return (
     <Box flexDirection="column">
-      <Text>
-        {"┌"} Conjunction ─ run {shortId(model.runId)} ─ task: "{truncate(model.taskTitle, 48)}"
-      </Text>
-      <Text>
-        {"│"} state: {phaseLabel(model)}
-        {"   "}elapsed {formatElapsed(model.startedAt, Date.now())}
-        {model.branch.length > 0 ? `   branch ${model.branch}` : ""}
-      </Text>
-      <Text>
-        {"├"} Agent output{" "}
-        {model.follow ? "(autoscroll)" : `(scrolled ${model.scrollOffset} ↑ — ↓ to end resumes)`}
+      {model.contextReady && <InfoBox model={model} width={contentWidth} />}
+      <Text> </Text>
+      {model.steps.map((step) => (
+        <Box key={step.id} flexDirection="column">
+          <StepRow step={step} spinner={spinner} width={contentWidth} />
+          {step.id === model.currentVerifyStepId &&
+            model.verifyItems.map((item) => (
+              <VerifyItemRow key={item.name} item={item} spinner={spinner} />
+            ))}
+        </Box>
+      ))}
+      <Text> </Text>
+      <Text dimColor>
+        {"──"} agent output
+        {model.follow ? "" : ` (scrolled ${model.scrollOffset} ↑ — ↓ to end resumes)`}
         {model.truncatedLines > 0 ? ` · ${model.truncatedLines} earlier lines dropped` : ""}
+        {" ──"}
       </Text>
       <Box flexDirection="column" height={height}>
         {visible.map((line, index) => (
           <Text key={index} dimColor={line.stream !== "stdout"}>
-            {"│ "}
             {line.text}
           </Text>
         ))}
+        {Array.from({ length: blankLines }, (_, index) => (
+          <Text key={`blank-${index}`}> </Text>
+        ))}
       </Box>
-      <Text>{"├"} Verification</Text>
-      {model.verifyItems.length === 0 ? (
-        <Text dimColor>{"│ "}(no verification commands configured)</Text>
-      ) : (
-        model.verifyItems.map((item) => (
-          <VerifyLine key={item.name} item={item} spinner={spinner} />
-        ))
-      )}
-      {done && <FinalPanel model={model} />}
-      <Text>
-        {"└"} {done ? "q / enter: exit" : "q / Ctrl-C: cancel run · ↑/↓: scroll"}
+      <Text> </Text>
+      {done && <FinalBox model={model} width={contentWidth} />}
+      <Text dimColor>
+        {done
+          ? "q / enter: exit"
+          : `elapsed ${formatElapsed(model.startedAt, Date.now())} · q / Ctrl-C: cancel · ↑/↓: scroll`}
       </Text>
     </Box>
   );

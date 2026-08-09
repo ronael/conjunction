@@ -35,6 +35,7 @@ function makeTask(): Task {
 
 function runningModel(): RunModel {
   const model = new RunModel();
+  model.verifyItems = [{ name: "typecheck", status: "pending" }];
   model.setContext({
     run: makeRun("running"),
     task: makeTask(),
@@ -66,7 +67,7 @@ function finalResult(state: Run["state"]): RunTaskResult {
         },
       ],
     },
-    cleanupNote: "cleanup:  worktree preserved for inspection",
+    cleanupNote: "worktree preserved for inspection",
   };
 }
 
@@ -75,26 +76,38 @@ async function flush(): Promise<void> {
 }
 
 describe("RunApp", () => {
-  it("renders the header and streaming agent output while running", async () => {
+  it("renders the info box, checklist and streaming output while running", async () => {
     const model = runningModel();
     model.appendOutput("thinking…\nwriting hello.txt\n", "stdout");
     model.appendOutput("a warning\n", "stderr");
     const { lastFrame, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Conjunction ─ run a1b2c3d4");
-    expect(frame).toContain('task: "add a dark-mode toggle"');
-    expect(frame).toContain("RUNNING (agent)");
-    expect(frame).toContain("branch conjunction/a1b2c3d4");
-    expect(frame).toContain("elapsed 00:");
-    expect(frame).toContain("Agent output (autoscroll)");
+    // rounded info box with dim-key/bright-value rows
+    expect(frame).toContain("╭");
+    expect(frame).toContain("╰");
+    expect(frame).toContain("Task");
+    expect(frame).toContain("add a dark-mode toggle");
+    expect(frame).toContain("Branch");
+    expect(frame).toContain("conjunction/a1b2c3d4");
+    expect(frame).toContain("Worktree");
+    expect(frame).toContain("/tmp/repo/.conjunction/worktrees/a1b2c3d4");
+    expect(frame).toContain("Verify");
+    expect(frame).toContain("typecheck");
+    // checklist: workspace done, agent active
+    expect(frame).toContain("✓ Workspace ready");
+    expect(frame).toContain("Agent (attempt 1)");
+    // toned-down output pane label + streamed content
+    expect(frame).toContain("── agent output");
     expect(frame).toContain("thinking…");
     expect(frame).toContain("writing hello.txt");
     expect(frame).toContain("a warning");
-    expect(frame).toContain("q / Ctrl-C: cancel run");
+    // footer
+    expect(frame).toContain("elapsed 00:");
+    expect(frame).toContain("q / Ctrl-C: cancel");
     unmount();
   });
 
@@ -131,58 +144,59 @@ describe("RunApp", () => {
     model.commandStarted({ name: "lint", command: "pnpm", args: [] });
 
     const { lastFrame, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("VERIFYING");
-    expect(frame).toContain("● typecheck");
-    expect(frame).toContain("✓ 1.2s");
-    expect(frame).toContain("● test");
-    expect(frame).toContain("✗ exit 1");
+    expect(frame).toContain("Verification");
+    expect(frame).toContain("✓ typecheck");
+    expect(frame).toContain("1.2s");
+    expect(frame).toContain("✗ test");
+    expect(frame).toContain("exit 1");
     expect(frame).toContain("boom: expected true to be false");
-    expect(frame).toContain("● lint");
-    expect(frame).toContain("running");
+    expect(frame).toContain("lint");
     unmount();
   });
 
-  it("renders the COMPLETED final panel with worktree, verify recap and metadata", async () => {
+  it("renders the COMPLETED final box with state, verify recap and metadata", async () => {
     const model = runningModel();
     model.finish(finalResult("completed"));
     const { lastFrame, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
 
     const frame = lastFrame() ?? "";
     expect(frame).toContain("✓ COMPLETED");
-    expect(frame).toContain("branch: conjunction/a1b2c3d4");
-    expect(frame).toContain("worktree: /tmp/repo/.conjunction/worktrees/a1b2c3d4");
-    expect(frame).toContain("verify: passed (typecheck ✓)");
-    expect(frame).toContain("metadata: /tmp/repo/.conjunction/runs/a1b2c3d4-full-run-id.json");
+    expect(frame).toContain("State");
+    expect(frame).toContain("conjunction/a1b2c3d4");
+    expect(frame).toContain("/tmp/repo/.conjunction/worktrees/a1b2c3d4");
+    expect(frame).toContain("passed (typecheck ✓)");
+    expect(frame).toContain("/tmp/repo/.conjunction/runs/a1b2c3d4-full-run-id.json");
+    expect(frame).toContain("worktree preserved for inspection");
     expect(frame).toContain("q / enter: exit");
     unmount();
   });
 
-  it("renders FAILED and CANCELLED final panels", async () => {
+  it("renders FAILED and CANCELLED final boxes", async () => {
     const failed = runningModel();
     const failedResult = finalResult("failed");
     failedResult.run = { ...failedResult.run!, result: { error: "verification failed: test" } };
     failed.finish(failedResult);
     const failedRender = render(
-      <RunApp model={failed} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={failed} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
     const failedFrame = failedRender.lastFrame() ?? "";
     expect(failedFrame).toContain("✗ FAILED");
-    expect(failedFrame).toContain("error: verification failed: test");
+    expect(failedFrame).toContain("verification failed: test");
     failedRender.unmount();
 
     const cancelled = runningModel();
     cancelled.finish(finalResult("cancelled"));
     const cancelledRender = render(
-      <RunApp model={cancelled} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={cancelled} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
     expect(cancelledRender.lastFrame() ?? "").toContain("■ CANCELLED");
@@ -194,7 +208,7 @@ describe("RunApp", () => {
     const onQuit = vi.fn();
     const model = runningModel();
     const { stdin, unmount } = render(
-      <RunApp model={model} onCancel={onCancel} onQuit={onQuit} viewportHeight={6} />,
+      <RunApp model={model} onCancel={onCancel} onQuit={onQuit} viewportHeight={6} width={64} />,
     );
     await flush();
     stdin.write("q");
@@ -215,7 +229,7 @@ describe("RunApp", () => {
     const onCancel = vi.fn();
     const model = runningModel();
     const { stdin, unmount } = render(
-      <RunApp model={model} onCancel={onCancel} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={onCancel} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
     stdin.write("\u0003");
@@ -230,11 +244,11 @@ describe("RunApp", () => {
       model.appendOutput(`line-${i}\n`, "stdout");
     }
     const { lastFrame, stdin, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={5} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={5} width={64} />,
     );
     await flush();
     expect(lastFrame() ?? "").toContain("line-19");
-    expect(lastFrame() ?? "").toContain("(autoscroll)");
+    expect(lastFrame() ?? "").not.toContain("scrolled");
 
     stdin.write("\u001B[A"); // up
     await flush();
@@ -245,12 +259,12 @@ describe("RunApp", () => {
 
     stdin.write("\u001B[B"); // down, back to the tail
     await flush();
-    expect(lastFrame() ?? "").toContain("(autoscroll)");
+    expect(lastFrame() ?? "").not.toContain("scrolled");
     expect(lastFrame() ?? "").toContain("line-19");
     unmount();
   });
 
-  it("renders the correction phase distinctly and resets verification items", async () => {
+  it("shows a Correction checklist step and resets verification items for the re-check", async () => {
     const model = runningModel();
     model.verifyItems = [{ name: "test", status: "pending" }];
     model.startVerification();
@@ -265,31 +279,33 @@ describe("RunApp", () => {
       durationMs: 42,
       timedOut: false,
     });
+    model.verificationFinished(false);
     model.startCorrection(["test"]);
 
     const { lastFrame, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("CORRECTING (attempt 2/2)");
+    expect(frame).toContain("✗ Verification");
+    expect(frame).toContain("test failed");
+    expect(frame).toContain("Correction (attempt 2)");
     expect(frame).toContain("correction attempt 2/2: fixing failed verification (test)");
-    // while correcting, the pane still shows what failed…
-    expect(frame).toContain("● test");
-    expect(frame).toContain("✗ exit 1");
+    // while correcting, the failed item is still visible…
+    expect(frame).toContain("✗ test");
 
     // …and resets to pending when the re-check starts
     model.startVerification();
     await flush();
     const recheck = lastFrame() ?? "";
-    expect(recheck).toContain("VERIFYING");
-    expect(recheck).toContain("pending");
-    expect(recheck).not.toContain("✗ exit 1");
+    expect(recheck).toContain("Verification (attempt 2)");
+    expect(recheck).toContain("• test");
+    expect(recheck).not.toContain("✗ test");
     unmount();
   });
 
-  it("final panel notes how many attempts ran", async () => {
+  it("final box notes how many attempts ran", async () => {
     const model = runningModel();
     const result = finalResult("completed");
     result.run = {
@@ -301,10 +317,10 @@ describe("RunApp", () => {
     };
     model.finish(result);
     const { lastFrame, unmount } = render(
-      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} />,
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
-    expect(lastFrame() ?? "").toContain("attempts: 2 (initial + correction)");
+    expect(lastFrame() ?? "").toContain("2 (initial + correction)");
     unmount();
   });
 });

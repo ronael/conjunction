@@ -16,6 +16,32 @@ import {
 } from "../workspace/index.js";
 
 import { RunStore } from "./run-store.js";
+import { formatDuration } from "./format.js";
+
+/** Daytona-style checklist line for plain output: "✓ Workspace ready    <detail>". */
+function stepLine(symbol: string, label: string, detail?: string): string {
+  const left = `${symbol} ${label}`;
+  return detail === undefined ? `${left}\n` : `${left.padEnd(28)}${detail}\n`;
+}
+
+function attemptDuration(attempt: Run["attempts"][number] | undefined): string | undefined {
+  if (attempt?.startedAt === undefined || attempt.completedAt === undefined) {
+    return undefined;
+  }
+  return formatDuration(Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt));
+}
+
+/** Checklist line for a finished agent attempt, derived from the run state. */
+function agentStepLine(run: Run, label: string): string {
+  const attempt = run.attempts.at(-1);
+  if (run.state === "failed") {
+    return stepLine("✗", label, run.result?.error ?? "failed");
+  }
+  if (run.state === "cancelled") {
+    return stepLine("■", label, "cancelled");
+  }
+  return stepLine("✓", label, attemptDuration(attempt));
+}
 
 export interface RunTaskOptions {
   description: string;
@@ -41,6 +67,8 @@ export interface RunObserver {
   context?(ctx: { run: Run; task: Task; repoRoot: string; storeDir: string }): void;
   agentOutput?(chunk: string, stream: "stdout" | "stderr"): void;
   verificationStarted?(): void;
+  /** Verification finished (either round); `passed` is the aggregate outcome. */
+  verificationFinished?(passed: boolean): void;
   commandStarted?(command: VerificationCommand): void;
   commandFinished?(command: VerificationCommand, result: CommandResult): void;
   /** Verification failed and the single correction attempt is starting. */
@@ -109,7 +137,17 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         lastVerification = await runVerification(options.verifyCommands, {
           cwd: run.workspacePath,
           onCommandStart: (command) => observer?.commandStarted?.(command),
-          onCommandEnd: (command, result) => observer?.commandFinished?.(command, result),
+          onCommandEnd: (command, result) => {
+            observer?.commandFinished?.(command, result);
+            const status = result.timedOut
+              ? "timed out"
+              : result.exitCode === 0
+                ? `(${formatDuration(result.durationMs)})`
+                : `exit ${result.exitCode ?? "null"}`;
+            out(
+              `  ${result.timedOut || result.exitCode !== 0 ? "✗" : "✓"} ${result.name} ${status}\n`,
+            );
+          },
         });
         return lastVerification;
       },
@@ -132,14 +170,22 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       : options.description;
   const task = orchestrator.createTask({ title, objective: options.description });
   const run = orchestrator.createRun(task.id, adapter.id);
-  out(`run:    ${run.id}\ntask:   ${task.title}\n`);
+  out(`run:    ${run.id}\ntask:   ${task.title}\n\n`);
+
+  const hasVerify = options.verifyCommands.length > 0;
+  const failedVerifyNames = (): string =>
+    (run.verificationResult?.results ?? [])
+      .filter((result) => result.timedOut || result.exitCode !== 0)
+      .map((result) => result.name)
+      .join(", ");
 
   try {
     await orchestrator.startRun(run.id);
     await flush(task, run);
-    out(`branch: ${run.branch ?? "-"}\nworktree: ${run.workspacePath ?? "-"}\n`);
+    out(stepLine("✓", "Workspace ready", run.branch));
+    out(`  worktree: ${run.workspacePath ?? "-"}\n`);
     observer?.context?.({ run, task, repoRoot, storeDir: store.dir });
-    out("\n--- agent output ---\n");
+    out("\n── agent output ──\n");
 
     const executeOptions: Parameters<Orchestrator["executeRun"]>[1] = {
       timeoutMs: options.timeoutMinutes * 60_000,
@@ -153,13 +199,24 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     }
     await orchestrator.executeRun(run.id, executeOptions);
     await flush(task, run);
+    out(agentStepLine(run, "Agent (attempt 1)"));
 
     if (run.state === "running") {
-      out("\n--- verification ---\n");
+      if (hasVerify) {
+        out("\n── verification ──\n");
+      }
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
       await orchestrator.verifyRun(run.id, { correction: options.correct });
+      observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
       await flush(task, run);
+      if (hasVerify) {
+        out(
+          run.verificationResult?.passed === true
+            ? stepLine("✓", "Verification")
+            : stepLine("✗", "Verification", `${failedVerifyNames()} failed`),
+        );
+      }
 
       // Lot 6: one bounded correction attempt against the same worktree.
       // (cast: verifyRun mutates run.state past the narrowing above)
@@ -184,20 +241,27 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
           passedNames,
         );
 
-        out("\n--- correction (attempt 2/2) ---\n");
+        out("\n── correction (attempt 2/2) ──\n");
         out(`verification failed for: ${failedNames.join(", ")}\n`);
         out("sending a correction packet to the same worker\n");
-        out("\n--- agent output (attempt 2) ---\n");
+        out("\n── agent output (attempt 2) ──\n");
         observer?.correctionStarted?.(failedNames);
         await orchestrator.executeCorrection(run.id, packet, executeOptions);
         await flush(task, run);
+        out(agentStepLine(run, "Correction (attempt 2)"));
 
         if ((run.state as RunState) === "correcting") {
-          out("\n--- verification (attempt 2) ---\n");
+          out("\n── verification (attempt 2) ──\n");
           observer?.verificationStarted?.();
           // no correction option: the cap makes this outcome terminal
           await orchestrator.verifyRun(run.id, { correction: false });
+          observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
           await flush(task, run);
+          out(
+            run.verificationResult?.passed === true
+              ? stepLine("✓", "Verification")
+              : stepLine("✗", "Verification", `${failedVerifyNames()} failed`),
+          );
         }
       }
     }
@@ -211,56 +275,51 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     out(`\nerror: ${(error as Error).message}\n`);
   }
 
-  out("\n--- summary ---\n");
-  out(`run:      ${run.id}\n`);
-  out(`state:    ${run.state}\n`);
+  out("\n── summary ──\n");
+  out(`State:     ${run.state.toUpperCase()}\n`);
+  out(`Task:      ${task.title}\n`);
+  out(`Run:       ${run.id}\n`);
   if (run.attempts.length > 0) {
     out(
-      `attempts: ${run.attempts.length}` +
+      `Attempts:  ${run.attempts.length}` +
         `${run.attempts.length > 1 ? " (initial + correction)" : ""}\n`,
     );
   }
-  out(`branch:   ${run.branch ?? "-"}\n`);
-  out(`worktree: ${run.workspacePath ?? "-"}\n`);
+  out(`Branch:    ${run.branch ?? "-"}\n`);
+  out(`Worktree:  ${run.workspacePath ?? "-"}\n`);
   if (run.result?.summary !== undefined) {
-    out(`agent:    finished — final message:\n  ${run.result.summary.split("\n").join("\n  ")}\n`);
+    out(`Agent:     finished — final message:\n  ${run.result.summary.split("\n").join("\n  ")}\n`);
   }
   if (run.result?.error !== undefined) {
-    out(`error:    ${run.result.error}\n`);
+    out(`Error:     ${run.result.error}\n`);
   }
   if (lastVerification !== undefined) {
     if (lastVerification.results.length === 0) {
-      out("verify:   no verification commands configured (vacuous pass)\n");
+      out("Verify:    no verification commands configured\n");
     } else {
-      out(`verify:   ${lastVerification.passed ? "passed" : "FAILED"}\n`);
-      for (const result of lastVerification.results) {
-        const status = result.timedOut ? "timed out" : `exit ${result.exitCode ?? "null"}`;
-        out(`  ${result.name}: ${status} (${result.durationMs}ms)\n`);
-      }
+      out(`Verify:    ${lastVerification.passed ? "passed" : "FAILED"}\n`);
     }
   }
   const metadataPath = path.join(store.dir, `${run.id}.json`);
-  out(`metadata: ${metadataPath} (+ .events.jsonl)\n`);
+  out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);
 
-  let cleanupNote: string | undefined;
+  let cleanupNote: string;
   if (options.cleanup && run.workspacePath !== undefined) {
     try {
       await removeRunWorkspace(repoRoot, run.id);
-      cleanupNote = "cleanup:  worktree and branch removed\n";
+      cleanupNote = "worktree and branch removed";
     } catch (error) {
       if (error instanceof DirtyWorktreeError) {
         cleanupNote =
-          "cleanup:  refused — worktree has uncommitted changes; " +
-          `preserved at ${run.workspacePath}\n`;
+          "refused — worktree has uncommitted changes; " + `preserved at ${run.workspacePath}`;
       } else {
-        cleanupNote = `cleanup:  failed — ${(error as Error).message}\n`;
+        cleanupNote = `failed — ${(error as Error).message}`;
       }
     }
   } else {
-    cleanupNote =
-      "cleanup:  worktree preserved for inspection (use --cleanup to attempt removal)\n";
+    cleanupNote = "worktree preserved for inspection (use --cleanup to attempt removal)";
   }
-  out(cleanupNote);
+  out(`Cleanup:   ${cleanupNote}\n`);
 
   const result: RunTaskResult = {
     exitCode: run.state === "completed" ? 0 : 1,

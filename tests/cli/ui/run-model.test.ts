@@ -171,6 +171,131 @@ describe("RunModel lifecycle", () => {
   });
 });
 
+describe("RunModel checklist steps", () => {
+  const failedResult = {
+    name: "test",
+    command: "test",
+    args: [],
+    exitCode: 1,
+    stdout: "",
+    stderr: "boom",
+    durationMs: 42,
+    timedOut: false,
+  };
+
+  it("workspace done (branch detail) + agent active after context", () => {
+    const model = modelWithContext();
+    expect(model.steps.map((s) => [s.id, s.status])).toEqual([
+      ["workspace", "done"],
+      ["agent-1", "active"],
+    ]);
+    expect(model.steps[0]?.detail).toBe("conjunction/a1b2c3d4");
+  });
+
+  it("verification lifecycle: agent step done, verify step failed with detail", () => {
+    const model = modelWithContext();
+    model.verifyItems = [{ name: "test", status: "pending" }];
+    model.startVerification();
+    expect(model.steps.find((s) => s.id === "agent-1")?.status).toBe("done");
+    expect(model.steps.find((s) => s.id === "verification-1")?.status).toBe("active");
+
+    model.commandStarted({ name: "test", command: "test", args: [] });
+    model.commandFinished(failedResult);
+    model.verificationFinished(false);
+    expect(model.steps.find((s) => s.id === "verification-1")).toMatchObject({
+      status: "failed",
+      detail: "test failed",
+    });
+  });
+
+  it("skips the verification step when no commands are configured", () => {
+    const model = modelWithContext();
+    model.verifyItems = [];
+    model.startVerification();
+    expect(model.steps.find((s) => s.id.startsWith("verification"))).toBeUndefined();
+    expect(model.steps.find((s) => s.id === "agent-1")?.status).toBe("done");
+  });
+
+  it("correction adds a Correction step; the re-check gets its own verify step", () => {
+    const model = modelWithContext();
+    model.verifyItems = [{ name: "test", status: "pending" }];
+    model.startVerification();
+    model.commandStarted({ name: "test", command: "test", args: [] });
+    model.commandFinished(failedResult);
+    model.verificationFinished(false);
+    model.startCorrection(["test"]);
+    expect(model.steps.find((s) => s.id === "agent-2")).toMatchObject({
+      status: "active",
+      label: "Correction (attempt 2)",
+    });
+
+    model.startVerification();
+    expect(model.steps.find((s) => s.id === "agent-2")?.status).toBe("done");
+    expect(model.steps.find((s) => s.id === "verification-2")).toMatchObject({
+      status: "active",
+      label: "Verification (attempt 2)",
+    });
+    expect(model.currentVerifyStepId).toBe("verification-2");
+
+    model.verificationFinished(true);
+    model.finish({
+      exitCode: 0,
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+      run: {
+        id: "a1b2c3d4",
+        taskId: "task-1",
+        runtime: "stub",
+        createdAt: "t0",
+        state: "completed",
+        attempts: [],
+      },
+      task: {
+        id: "task-1",
+        title: "t",
+        objective: "o",
+        constraints: [],
+        acceptanceCriteria: [],
+        status: "completed",
+      },
+    });
+    // every step resolved; the round-1 failure stays visible in history
+    expect(model.steps.map((s) => [s.id, s.status])).toEqual([
+      ["workspace", "done"],
+      ["agent-1", "done"],
+      ["verification-1", "failed"],
+      ["agent-2", "done"],
+      ["verification-2", "done"],
+    ]);
+  });
+
+  it("finish marks an open step failed when the run failed", () => {
+    const model = modelWithContext(); // agent-1 active
+    model.finish({
+      exitCode: 1,
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+      run: {
+        id: "a1b2c3d4",
+        taskId: "task-1",
+        runtime: "stub",
+        createdAt: "t0",
+        state: "failed",
+        attempts: [],
+      },
+      task: {
+        id: "task-1",
+        title: "t",
+        objective: "o",
+        constraints: [],
+        acceptanceCriteria: [],
+        status: "failed",
+      },
+    });
+    expect(model.steps.find((s) => s.id === "agent-1")?.status).toBe("failed");
+  });
+});
+
 describe("RunModel correction phase (lot 6)", () => {
   it("startCorrection switches phase and appends a boundary line to the output", () => {
     const model = modelWithContext();
