@@ -1,0 +1,5 @@
+dist/
+coverage/
+pnpm-lock.yaml
+# Handoff documents are imported as-is; do not reformat them.
+conjunction-handoff/
