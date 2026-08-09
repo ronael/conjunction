@@ -86,16 +86,41 @@ strict dependency direction enforced by convention:
 
 ## Not implemented yet (explicit)
 
-- Correction feedback loop (Lot 6), independent reviewer (Lot 7).
 - Multi-agent orchestration, planner, scheduler, message bus.
 - Additional agent adapters (claude-code, opencode, …); only codex exists.
+- Landing changes (committing/merging a run's worktree diff to the user's branch).
 - Configuration file (`conjunction.toml` or similar) — verification commands are
   CLI flags for now.
 - `.conjunction/` is not auto-added to the host repo's exclude file; in user repos it
   will show as untracked until that is handled.
 - Durable/resumable state: run metadata is persisted as JSON/JSONL, but an
   interrupted CLI process cannot resume a run.
-- UI of any kind.
+- Graphical/operator UI of any kind (the terminal TUI exists for `run`).
+
+## Consolidation pass (post-lot-7 audit)
+
+Behavior changes from the audit, recorded here so the docs don't drift:
+
+- **State machine:** added `verifying → cancelled` — user abort is now possible
+  from every non-terminal state (its omission made abort mid-verification
+  uncancellable).
+- **Abort during verification now works:** `runVerification` forwards the
+  AbortSignal to `execFile` (killing the running command), the CLI's verify
+  port rethrows on abort so the run never transitions to `failed`, and the CLI
+  maps any abort to `cancelRun`. Abort checks also guard every phase boundary.
+- **Reviewer diff includes untracked files.** `git diff HEAD` alone omitted
+  them — and agents mostly create new files, so reviewer packets were
+  effectively empty for new-file tasks. `getWorktreeDiff` now appends
+  synthetic new-file diff sections (binary files listed, not dumped).
+- **Cleanup is idempotent and partial-failure tolerant:**
+  `removeRunWorkspace` skips a worktree that is already gone and a branch that
+  is already deleted.
+- **Persistence is best-effort:** an unwritable `.conjunction/runs` directory
+  warns once and the run continues without metadata instead of crashing
+  mid-run.
+- **Dedupe:** the failed-verification predicate (`isFailedVerificationResult`)
+  and per-severity finding counts (`countFindingsBySeverity`) are single-sourced
+  in core.
 
 ## Lot 4/5 as implemented (supersedes the sketch below)
 
@@ -163,7 +188,7 @@ Design:
   20k chars each); passing checks summarized in one line; explicit "fix, don't redo"
   framing; the same workspace/git-safety rules as the initial prompt. The previous
   agent transcript is never included.
-- **Adapter seam**: `AgentRunInput.correctionPacket` replaces the task-derived
+- **Adapter seam**: `AgentRunInput.promptOverride` replaces the task-derived
   prompt when set — prompt ownership stays in the adapter.
 - **CLI**: correction is on by default when at least one `--verify` is given
   (`--no-correct` disables; no verification → nothing to correct against). Plain
@@ -181,9 +206,10 @@ Design:
    after the agent attempt, via the vacuous verification pass).
 2. **Review only after the FINAL verification passed.** New state `reviewing` with
    exactly two new edges: `verifying → reviewing` (pass + review enabled) and
-   `reviewing → completed | cancelled`. No `running → reviewing` edge: the
-   no-verify path goes through the (vacuous) verifyRun like everything else, so
-   one entry point suffices — minimal correct edge set. Failed verification
+   `reviewing → completed | cancelled`. (The consolidation pass later added
+   `verifying → cancelled` for mid-verification abort; see that section.) No
+   `running → reviewing` edge: the no-verify path goes through the (vacuous)
+   verifyRun like everything else, so one entry point suffices. Failed verification
    (correction exhausted or disabled) never reviews.
 3. **Advisory by construction.** Findings never change the exit code and never
    feed the correction loop. Reopening self-healing via review findings is

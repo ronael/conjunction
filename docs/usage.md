@@ -128,21 +128,25 @@ checklist lines as steps complete, per-command verify lines as they finish,
 and an aligned key-value summary. `conjunction status` and
 `conjunction doctor` use the same ✓/✗/■ symbols.
 
-Keys: `q` or `Ctrl-C` cancels the run gracefully while running (the agent
-process group is killed via the AbortSignal path; a second Ctrl-C in plain
-mode force-exits), `q` / `enter` dismisses the final panel.
+Keys: `q` or `Ctrl-C` cancels the run gracefully at any phase — during the
+agent (its process group is killed via the AbortSignal path) as well as during
+verification (the running command is killed; the run ends `cancelled`, never
+`failed` because you interrupted it). A second Ctrl-C in plain mode
+force-exits. `q` / `enter` dismisses the final panel.
 
 Exit codes: `0` = run completed (agent exited cleanly and verification passed,
 or no `--verify` was given); `1` = run failed/cancelled; `2` = usage or setup
 error (not a git repo, agent runtime unavailable, …).
 
-Every run writes:
+Every run writes (best-effort: if the directory is not writable the run
+continues with a warning and no metadata):
 
 - `.conjunction/runs/<runId>.json` — task + run metadata, rewritten at each
   state change;
 - `.conjunction/runs/<runId>.events.jsonl` — the full event stream
   (`task.created`, `run.started`, `workspace.created`, `agent.started`,
-  `agent.output`, `agent.completed`, `verification.*`, `run.completed/…`).
+  `agent.output`, `agent.completed`, `verification.*`, `correction.*`,
+  `review.*`, `run.completed/failed/cancelled`).
 
 ### `conjunction status`
 
@@ -150,8 +154,9 @@ Lists recorded runs (newest first):
 
 ```bash
 $ node dist/cli/main.js status --repo /path/to/repo
-bfa1b6a3-…  completed  codex-cli  2026-08-08T22:07:17.419Z  create a file hello.txt …
-  branch: conjunction/bfa1b6a3-…  worktree: /path/to/repo/.conjunction/worktrees/bfa1b6a3-…
+✓ bfa1b6a3  COMPLETED  codex-cli  2026-08-08T22:07:17.419Z  create a file hello.txt …
+   Branch   conjunction/bfa1b6a3-…
+   Worktree /path/to/repo/.conjunction/worktrees/bfa1b6a3-…
 ```
 
 ## A real example
@@ -161,18 +166,25 @@ $ node dist/cli/main.js run "create a file hello.txt containing the text hello c
     --repo /tmp/demo-repo --timeout 8
 run:    bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
 task:   create a file hello.txt containing the text hello conjunction
-branch: conjunction/bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
-worktree: /tmp/demo-repo/.conjunction/worktrees/bfa1b6a3-…
 
---- agent output ---
+✓ Workspace ready             conjunction/bfa1b6a3-…
+  worktree: /tmp/demo-repo/.conjunction/worktrees/bfa1b6a3-…
+
+── agent output ──
 …codex output…
+✓ Agent (attempt 1)             12.4s
 
---- summary ---
-state:    completed
-agent:    finished — final message: Created `hello.txt` …
-verify:   no verification commands configured (vacuous pass)
-metadata: /tmp/demo-repo/.conjunction/runs/bfa1b6a3-….json (+ .events.jsonl)
-cleanup:  worktree preserved for inspection (use --cleanup to attempt removal)
+── summary ──
+State:     COMPLETED
+Task:      create a file hello.txt containing the text hello conjunction
+Run:       bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
+Attempts:  1
+Branch:    conjunction/bfa1b6a3-…
+Worktree:  /tmp/demo-repo/.conjunction/worktrees/bfa1b6a3-…
+Agent:     finished — final message: Created `hello.txt` …
+Verify:    no verification commands configured
+Metadata:  /tmp/demo-repo/.conjunction/runs/bfa1b6a3-….json (+ .events.jsonl)
+Cleanup:   worktree preserved for inspection (use --cleanup to attempt removal)
 ```
 
 ## Safety notes

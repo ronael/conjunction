@@ -16,7 +16,7 @@ for the current architecture and what is deliberately not built yet.
   adapters behind narrow interfaces.
 - Favor deterministic behavior for verification and state transitions.
 - Do not implement speculative multi-agent features while the single-agent loop is
-  unfinished. No UI, no database.
+  unfinished. No database.
 
 ## Module boundaries
 
@@ -31,6 +31,9 @@ for the current architecture and what is deliberately not built yet.
   Adapters report process outcome only — never pass/fail judgments.
 - `src/cli/` is the composition root: it wires core + workspace + verification +
   the adapter and owns run persistence (`.conjunction/runs/*.json` + JSONL events).
+- `src/cli/ui/` (the TUI) is a leaf consumer: it reads run/task objects and the
+  `RunObserver` seams only. The engine must never know it exists; keep it
+  loadable via dynamic import so plain/CI mode never pulls in ink/react.
 - Tests mirror `src/` under `tests/`. Unit tests for adapters must fake the
   process spawner — never invoke a real agent runtime in vitest.
 
