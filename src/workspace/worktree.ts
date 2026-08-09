@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFile, stat } from "node:fs/promises";
 
 import { execGit } from "./git.js";
 
@@ -102,10 +103,45 @@ export async function getWorktreeStatus(worktreePath: string): Promise<WorktreeS
   return { clean: entries.length === 0, entries };
 }
 
-/** Unified diff of the worktree against HEAD (committed + uncommitted changes). */
+/**
+ * Unified diff of the worktree against HEAD — committed AND uncommitted
+ * changes, including UNTRACKED files (which plain `git diff HEAD` omits, and
+ * which is what agents mostly produce: new files). Untracked files are read
+ * from disk and rendered as synthetic new-file diff sections; binary files
+ * are listed but not dumped.
+ */
 export async function getWorktreeDiff(worktreePath: string): Promise<string> {
-  const { stdout } = await execGit(["diff", "HEAD"], { cwd: worktreePath });
-  return stdout;
+  const { stdout: tracked } = await execGit(["diff", "HEAD"], { cwd: worktreePath });
+  const { stdout: untrackedRaw } = await execGit(["ls-files", "--others", "--exclude-standard"], {
+    cwd: worktreePath,
+  });
+  const untracked = untrackedRaw.split("\n").filter((line) => line.length > 0);
+  if (untracked.length === 0) {
+    return tracked;
+  }
+  const sections = [tracked.trimEnd()];
+  for (const file of untracked.sort()) {
+    sections.push(await syntheticNewFileDiff(worktreePath, file));
+  }
+  return sections.filter((section) => section.length > 0).join("\n") + "\n";
+}
+
+async function syntheticNewFileDiff(worktreePath: string, file: string): Promise<string> {
+  let content: string;
+  try {
+    content = await readFile(path.join(worktreePath, file), "utf8");
+  } catch {
+    return `# ${file}: unreadable file, contents omitted\n`;
+  }
+  if (content.includes(String.fromCharCode(0))) {
+    return `diff --git a/${file} b/${file}\nnew file mode 100644\n# (binary file, contents omitted)\n`;
+  }
+  const contentLines = content.trimEnd().split("\n");
+  const count = contentLines.length;
+  const header =
+    `diff --git a/${file} b/${file}\nnew file mode 100644\n` +
+    `--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${count} @@`;
+  return `${header}\n${contentLines.map((line) => `+${line}`).join("\n")}`;
 }
 
 export interface CleanupOptions {
@@ -135,20 +171,33 @@ export async function removeRunWorkspace(
   const branch = branchNameForRun(runId);
   const worktreePath = worktreePathForRun(repoRoot, runId);
 
-  const status = await getWorktreeStatus(worktreePath);
-  if (!status.clean && options.force !== true) {
-    throw new DirtyWorktreeError(worktreePath, status);
-  }
+  // Partial-failure tolerance: an earlier cleanup may have removed the
+  // worktree but failed before deleting the branch (or vice versa). Skip
+  // whichever half is already done instead of erroring.
+  const worktreeExists = await stat(worktreePath).then(
+    () => true,
+    () => false,
+  );
 
-  const removeArgs = ["worktree", "remove"];
-  if (options.force === true) {
-    removeArgs.push("--force");
+  if (worktreeExists) {
+    const status = await getWorktreeStatus(worktreePath);
+    if (!status.clean && options.force !== true) {
+      throw new DirtyWorktreeError(worktreePath, status);
+    }
+
+    const removeArgs = ["worktree", "remove"];
+    if (options.force === true) {
+      removeArgs.push("--force");
+    }
+    removeArgs.push(worktreePath);
+    await execGit(removeArgs, { cwd: repoRoot });
   }
-  removeArgs.push(worktreePath);
-  await execGit(removeArgs, { cwd: repoRoot });
 
   // `branch` is always `${BRANCH_PREFIX}${runId}` with a validated run id,
   // so this can only ever target a conjunction-owned branch. The branch is
   // not checked out anywhere once its worktree is removed, so -D is safe.
-  await execGit(["branch", "-D", branch], { cwd: repoRoot });
+  const { stdout: existing } = await execGit(["branch", "--list", branch], { cwd: repoRoot });
+  if (existing.trim().length > 0) {
+    await execGit(["branch", "-D", branch], { cwd: repoRoot });
+  }
 }

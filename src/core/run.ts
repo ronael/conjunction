@@ -7,7 +7,7 @@ import type { ReviewFinding } from "./review.js";
  *
  *   pending    -> running | cancelled
  *   running    -> verifying | failed | cancelled
- *   verifying  -> completed | failed | correcting | reviewing
+ *   verifying  -> completed | failed | correcting | reviewing | cancelled
  *   correcting -> verifying | failed | cancelled
  *   reviewing  -> completed | cancelled
  *   completed / failed / cancelled are terminal.
@@ -20,6 +20,10 @@ import type { ReviewFinding } from "./review.js";
  * `reviewing` (lot 7) is entered only from a PASSED verification when review
  * is enabled, and always terminates in `completed` (reviewer failures are
  * advisory, they never fail the run) or `cancelled`.
+ *
+ * Cancellation is possible from every non-terminal state, including mid-
+ * verification (`verifying -> cancelled`, added in the consolidation pass —
+ * its omission made user abort during verification uncancellable).
  */
 export type RunState =
   | "pending"
@@ -34,13 +38,21 @@ export type RunState =
 const ALLOWED_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed", "correcting", "reviewing"],
+  verifying: ["completed", "failed", "correcting", "reviewing", "cancelled"],
   correcting: ["verifying", "failed", "cancelled"],
   reviewing: ["completed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
 };
+
+/** The single predicate for "this verification command failed" (timeout or non-zero exit). */
+export function isFailedVerificationResult(result: {
+  exitCode: number | null;
+  timedOut: boolean;
+}): boolean {
+  return result.timedOut || result.exitCode !== 0;
+}
 
 export class InvalidRunStateTransitionError extends Error {
   constructor(

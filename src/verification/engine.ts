@@ -33,6 +33,12 @@ export interface RunVerificationOptions {
   failFast?: boolean;
   /** Default per-command timeout. Default: 5 minutes. */
   timeoutMs?: number;
+  /**
+   * Cancellation: forwarded to execFile, so aborting kills the currently
+   * running command immediately (it surfaces as a failed, non-timeout result
+   * with exitCode null — the caller maps that to a cancelled run).
+   */
+  signal?: AbortSignal;
   /** Progress seam for UIs: fired right before a command starts. */
   onCommandStart?: (command: VerificationCommand) => void;
   /** Progress seam for UIs: fired after a command finishes (any outcome). */
@@ -72,6 +78,9 @@ export async function runVerification(
   const results: CommandResult[] = [];
 
   for (const command of commands) {
+    if (options.signal?.aborted === true) {
+      break; // cancelled: do not start further commands
+    }
     options.onCommandStart?.(command);
     const result = await runCommand(command, options);
     options.onCommandEnd?.(command, result);
@@ -101,6 +110,7 @@ async function runCommand(
         timeout: timeoutMs,
         maxBuffer: MAX_BUFFER_BYTES,
         encoding: "utf8",
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
       },
       (error, stdout, stderr) => {
         const base: CommandResult = {

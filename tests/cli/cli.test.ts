@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -444,6 +444,140 @@ describe("cli run (stub adapter, real git repo)", () => {
       await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
     ) as { run: { state: string } };
     expect(stored.run.state).toBe("cancelled");
+  });
+});
+
+describe("cli run — audit error paths", () => {
+  it("abort before start: run cancels, agent never called, no worktree created", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const controller = new AbortController();
+    controller.abort();
+    let agentCalls = 0;
+    const countingStub = stubAdapter(() => {
+      agentCalls++;
+      return Promise.resolve({});
+    });
+    const result = await runTask(
+      {
+        description: "never starts",
+        repoPath: repo,
+        verifyCommands: [],
+        timeoutMinutes: 5,
+        cleanup: false,
+        correct: false,
+        review: false,
+      },
+      { adapter: countingStub, out: io.out, signal: controller.signal },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.run?.state).toBe("cancelled");
+    expect(agentCalls).toBe(0);
+    expect(io.text()).toContain("cancelled by user");
+  });
+
+  it("abort DURING verification: command killed, run cancelled (not failed)", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const controller = new AbortController();
+    const slowVerify = {
+      name: "slow",
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 60_000)"],
+    };
+    const promise = runTask(
+      {
+        description: "verify gets cancelled",
+        repoPath: repo,
+        verifyCommands: [slowVerify],
+        timeoutMinutes: 5,
+        cleanup: false,
+        correct: false,
+        review: false,
+      },
+      { adapter: fileCreatingStub, out: io.out, signal: controller.signal },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 600)); // let verification start
+    controller.abort();
+    const result = await promise;
+    expect(result.exitCode).toBe(1);
+    expect(result.run?.state).toBe("cancelled");
+    expect(io.text()).toContain("cancelled by user");
+    expect(io.text()).not.toContain("verification failed");
+  });
+
+  it("unwritable .conjunction/runs: run degrades cleanly with a warning", async () => {
+    const repo = await makeTempRepo();
+    // make the runs dir unpersistable: a FILE named "runs" blocks mkdir
+    const conjunctionDir = path.join(repo, ".conjunction");
+    await mkdir(conjunctionDir, { recursive: true });
+    await writeFile(path.join(conjunctionDir, "runs"), "not a directory\n");
+
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0); // the run itself still completed
+    expect(io.text()).toContain("warning: could not persist run metadata");
+    expect(io.text()).toContain("State:     COMPLETED");
+    // warned exactly once despite several flush points
+    expect(io.text().match(/could not persist run metadata/g)).toHaveLength(1);
+  });
+
+  it("full chain: verify-fail -> correction -> verify-pass -> review (post-correction diff)", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const reviewPrompts: string[] = [];
+    const fixingStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        reviewPrompts.push(input.promptOverride ?? "");
+        return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
+      }
+      if (input.promptOverride !== undefined) {
+        // correction attempt: fix the failure AND add a second file
+        await writeFile(path.join(input.workspacePath, "good.txt"), "fixed\n");
+        await writeFile(path.join(input.workspacePath, "extra.txt"), "post-correction\n");
+      }
+      return {};
+    });
+
+    const code = await cli(
+      ["run", "create good.txt", "--repo", repo, "--verify", "test -f good.txt", "--review"],
+      { adapter: fixingStub, out: io.out },
+    );
+
+    expect(code).toBe(0);
+    expect(io.text()).toContain("── correction (attempt 2/2) ──");
+    expect(io.text()).toContain("── review ──");
+    expect(io.text()).toContain("State:     COMPLETED");
+
+    // the reviewer saw the POST-correction diff (both new files present)
+    expect(reviewPrompts).toHaveLength(1);
+    expect(reviewPrompts[0]).toContain("good.txt");
+    expect(reviewPrompts[0]).toContain("extra.txt");
+    expect(reviewPrompts[0]).toContain("post-correction");
+
+    // persisted: 2 attempts + review, events in the right order
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { state: string; attempts: unknown[]; review?: { structured: boolean } } };
+    expect(stored.run.state).toBe("completed");
+    expect(stored.run.attempts).toHaveLength(2);
+    expect(stored.run.review?.structured).toBe(true);
+
+    const events = await readFile(
+      path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+      "utf8",
+    );
+    const types = events
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types.indexOf("correction.completed")).toBeLessThan(types.indexOf("review.started"));
+    expect(types.indexOf("review.completed")).toBeLessThan(types.indexOf("run.completed"));
+    expect(types.at(-1)).toBe("run.completed");
   });
 });
 

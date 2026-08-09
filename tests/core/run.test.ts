@@ -22,7 +22,7 @@ const ALL_STATES: RunState[] = [
 const ALLOWED: Record<RunState, RunState[]> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed", "correcting", "reviewing"],
+  verifying: ["completed", "failed", "correcting", "reviewing", "cancelled"],
   correcting: ["verifying", "failed", "cancelled"],
   reviewing: ["completed", "cancelled"],
   completed: [],

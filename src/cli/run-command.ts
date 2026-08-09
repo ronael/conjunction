@@ -1,7 +1,12 @@
 import path from "node:path";
 
 import type { AgentAdapter, Run, RunReview, RunState, Task } from "../core/index.js";
-import { buildCorrectionPacket, buildReviewerPacket, Orchestrator } from "../core/index.js";
+import {
+  buildCorrectionPacket,
+  buildReviewerPacket,
+  isFailedVerificationResult,
+  Orchestrator,
+} from "../core/index.js";
 import type {
   CommandResult,
   VerificationCommand,
@@ -146,6 +151,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         }
         lastVerification = await runVerification(options.verifyCommands, {
           cwd: run.workspacePath,
+          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
           onCommandStart: (command) => observer?.commandStarted?.(command),
           onCommandEnd: (command, result) => {
             observer?.commandFinished?.(command, result);
@@ -159,6 +165,12 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
             );
           },
         });
+        // An abort mid-verification must surface as a CANCELLED run, not a
+        // verification failure: throw so verifyRun never transitions and the
+        // catch below can cancel from "verifying".
+        if (deps.signal?.aborted === true) {
+          throw new Error("cancelled by user");
+        }
         return lastVerification;
       },
     },
@@ -167,11 +179,33 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
 
   const store = new RunStore(path.join(repoRoot, ".conjunction", "runs"));
   let flushedEvents = 0;
+  let persistenceWarningShown = false;
+  /**
+   * Persistence is best-effort: a failing .conjunction/runs dir must not kill
+   * the run itself. Warn once, then keep going (degrade cleanly).
+   */
   const flush = async (task: Task, run: Run): Promise<void> => {
-    await store.save({ run, task });
-    const events = orchestrator.events.all();
-    await store.appendEvents(run.id, events.slice(flushedEvents));
-    flushedEvents = events.length;
+    try {
+      await store.save({ run, task });
+      const events = orchestrator.events.all();
+      await store.appendEvents(run.id, events.slice(flushedEvents));
+      flushedEvents = events.length;
+    } catch (error) {
+      if (!persistenceWarningShown) {
+        persistenceWarningShown = true;
+        out(
+          `warning: could not persist run metadata to ${store.dir}: ` +
+            `${(error as Error).message} (run continues without it)\n`,
+        );
+      }
+    }
+  };
+
+  /** Throw before starting a new phase when the user already cancelled. */
+  const throwIfAborted = (): void => {
+    if (deps.signal?.aborted === true) {
+      throw new Error("cancelled by user");
+    }
   };
 
   const title =
@@ -185,11 +219,12 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   const hasVerify = options.verifyCommands.length > 0;
   const failedVerifyNames = (): string =>
     (run.verificationResult?.results ?? [])
-      .filter((result) => result.timedOut || result.exitCode !== 0)
+      .filter(isFailedVerificationResult)
       .map((result) => result.name)
       .join(", ");
 
   try {
+    throwIfAborted();
     await orchestrator.startRun(run.id);
     await flush(task, run);
     out(stepLine("✓", "Workspace ready", run.branch));
@@ -215,6 +250,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       if (hasVerify) {
         out("\n── verification ──\n");
       }
+      throwIfAborted();
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
       await orchestrator.verifyRun(run.id, { correction: options.correct, review: options.review });
@@ -231,9 +267,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       // Lot 6: one bounded correction attempt against the same worktree.
       // (cast: verifyRun mutates run.state past the narrowing above)
       if ((run.state as RunState) === "correcting" && lastVerification !== undefined) {
-        const failedResults = lastVerification.results.filter(
-          (result) => result.timedOut || result.exitCode !== 0,
-        );
+        const failedResults = lastVerification.results.filter(isFailedVerificationResult);
         const failedNames = failedResults.map((result) => result.name);
         const passedNames = lastVerification.results
           .filter((result) => !result.timedOut && result.exitCode === 0)
@@ -254,6 +288,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         out("\n── correction (attempt 2/2) ──\n");
         out(`verification failed for: ${failedNames.join(", ")}\n`);
         out("sending a correction packet to the same worker\n");
+        throwIfAborted();
         out("\n── agent output (attempt 2) ──\n");
         observer?.correctionStarted?.(failedNames);
         await orchestrator.executeCorrection(run.id, packet, executeOptions);
@@ -280,6 +315,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     // passed. Advisory: findings never affect the exit code.
     if ((run.state as RunState) === "reviewing") {
       out("\n── review ──\n");
+      throwIfAborted();
       observer?.reviewStarted?.();
       const diff = run.workspacePath !== undefined ? await getWorktreeDiff(run.workspacePath) : "";
       const packet = buildReviewerPacket({
@@ -311,13 +347,29 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       }
     }
   } catch (error) {
-    if (run.state === "running" || run.state === "verifying" || run.state === "correcting") {
-      orchestrator.failRun(run.id, (error as Error).message);
+    const message = (error as Error).message;
+    const aborted = deps.signal?.aborted === true;
+    const cancellable =
+      run.state === "pending" ||
+      run.state === "running" ||
+      run.state === "verifying" ||
+      run.state === "correcting" ||
+      run.state === "reviewing";
+    if (aborted && cancellable) {
+      // user abort (q / Ctrl-C) at ANY phase: cancel, never fail
+      orchestrator.cancelRun(run.id, "cancelled by user");
+      out("\n■ cancelled by user\n");
+    } else if (run.state === "running" || run.state === "verifying" || run.state === "correcting") {
+      orchestrator.failRun(run.id, message);
+      out(`\nerror: ${message}\n`);
     } else if (run.state === "pending") {
-      orchestrator.cancelRun(run.id, (error as Error).message);
+      orchestrator.cancelRun(run.id, message);
+      out(`\nerror: ${message}\n`);
+    } else {
+      // reviewing / terminal: unexpected, but never crash the summary
+      out(`\nerror: ${message}\n`);
     }
     await flush(task, run);
-    out(`\nerror: ${(error as Error).message}\n`);
   }
 
   out("\n── summary ──\n");

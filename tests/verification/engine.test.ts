@@ -111,4 +111,31 @@ describe("runVerification", () => {
     // fail-fast: the third command never starts
     expect(calls).toEqual(["start:ok", "end:ok:0", "start:fail", "end:fail:1"]);
   });
+
+  it("abort kills the running command promptly and stops the loop", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const startedAt = Date.now();
+    const promise = runVerification(
+      [
+        { name: "slow", command: node, args: ["-e", "setTimeout(() => {}, 60_000)"] },
+        { ...ok, name: "never-runs" },
+      ],
+      {
+        cwd: CWD,
+        failFast: false,
+        signal: controller.signal,
+        onCommandStart: (command) => calls.push(`start:${command.name}`),
+      },
+    );
+    setTimeout(() => controller.abort(), 100);
+    const result = await promise;
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    expect(result.passed).toBe(false);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]?.exitCode).toBeNull();
+    expect(result.results[0]?.timedOut).toBe(false); // aborted, not timed out
+    // the loop stopped: the second command never started
+    expect(calls).toEqual(["start:slow"]);
+  });
 });

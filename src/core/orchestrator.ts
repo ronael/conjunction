@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import type { AgentAdapter, AgentRunInput, AgentRunResult } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
-import { parseReviewReport, REVIEW_OUTPUT_SCHEMA } from "./review.js";
+import { parseReviewReport, countFindingsBySeverity, REVIEW_OUTPUT_SCHEMA } from "./review.js";
 import {
+  isFailedVerificationResult,
   transitionRun,
   type AgentAttemptOutcome,
   type Attempt,
@@ -18,7 +19,7 @@ export const MAX_CORRECTIONS_PER_RUN = 1;
 /** Names of verification commands that failed in the run's latest outcome. */
 function failedCommandNames(run: Run): string[] {
   return (run.verificationResult?.results ?? [])
-    .filter((result) => result.exitCode !== 0 || result.timedOut)
+    .filter(isFailedVerificationResult)
     .map((result) => result.name);
 }
 
@@ -317,7 +318,7 @@ export class Orchestrator {
     return run;
   }
 
-  /** pending|running|correcting -> cancelled. */
+  /** Cancellation is possible from every non-terminal state. */
   cancelRun(runId: string, reason?: string): Run {
     const run = this.#requireRun(runId);
     const task = this.#requireTask(run.taskId);
@@ -513,9 +514,7 @@ export class Orchestrator {
         agentResult,
       };
       counts.total = parsed.report.findings.length;
-      for (const finding of parsed.report.findings) {
-        counts[finding.severity]++;
-      }
+      Object.assign(counts, countFindingsBySeverity(parsed.report.findings));
     }
     this.#emit({
       type: "review.completed",

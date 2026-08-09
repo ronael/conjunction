@@ -37,20 +37,18 @@ export function stateLabel(state: string): string {
   return state.toUpperCase();
 }
 
+import { countFindingsBySeverity, type ReviewFinding } from "../core/index.js";
+
 /** "3 findings (1 major, 2 nit)" — shared by plain output and the TUI. */
-export function findingsSummary(
-  findings: readonly { severity: "critical" | "major" | "minor" | "nit" }[],
-): string {
+export function findingsSummary(findings: readonly ReviewFinding[]): string {
   const total = findings.length;
   if (total === 0) {
     return "no findings";
   }
+  const counts = countFindingsBySeverity(findings);
   const parts = (["critical", "major", "minor", "nit"] as const)
-    .map((severity) => {
-      const count = findings.filter((finding) => finding.severity === severity).length;
-      return count > 0 ? `${count} ${severity}` : undefined;
-    })
-    .filter((part): part is string => part !== undefined)
+    .filter((severity) => counts[severity] > 0)
+    .map((severity) => `${counts[severity]} ${severity}`)
     .join(", ");
   return `${total} finding${total === 1 ? "" : "s"} (${parts})`;
 }

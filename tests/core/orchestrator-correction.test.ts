@@ -4,6 +4,7 @@ import {
   MAX_CORRECTIONS_PER_RUN,
   Orchestrator,
   RunNotExecutableError,
+  transitionRun,
   type AgentAdapter,
   type AgentRunInput,
   type VerificationOutcome,
@@ -205,5 +206,43 @@ describe("Orchestrator correction loop (lot 6)", () => {
     expect(run.state).toBe("failed");
     expect(run.result?.error).toBe("agent exited with code 1");
     expect(orchestrator.events.ofType("correction.completed")).toHaveLength(0);
+  });
+
+  it("a TIMED-OUT correction attempt fails the run", async () => {
+    const { adapter } = scriptedAgent([{ exitCode: 0 }, { exitCode: null, timedOut: true }]);
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([FAIL_TEST, { ...PASS }]));
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { correction: true });
+    await orchestrator.executeCorrection(run.id, PACKET, { timeoutMs: 5_000 });
+
+    expect(run.state).toBe("failed");
+    expect(run.result?.error).toBe("agent timed out after 5000ms");
+    expect(run.attempts).toHaveLength(2);
+    expect(run.attempts[1]?.agentResult?.timedOut).toBe(true);
+  });
+
+  it("an ABORTED correction attempt cancels the run", async () => {
+    const { adapter } = scriptedAgent([{ exitCode: 0 }, { exitCode: null, aborted: true }]);
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([FAIL_TEST, { ...PASS }]));
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { correction: true });
+    await orchestrator.executeCorrection(run.id, PACKET, { timeoutMs: 5_000 });
+
+    expect(run.state).toBe("cancelled");
+    expect(orchestrator.events.ofType("run.cancelled")).toHaveLength(1);
+  });
+
+  it("cancelRun is legal from verifying (mid-verification abort)", async () => {
+    const { adapter } = scriptedAgent([{ exitCode: 0 }]);
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    transitionRun(run, "verifying", "t");
+    orchestrator.cancelRun(run.id, "user abort");
+    expect(run.state).toBe("cancelled");
   });
 });

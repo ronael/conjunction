@@ -25,6 +25,17 @@ export interface ReviewReport {
   findings: ReviewFinding[];
 }
 
+/** Per-severity finding counts — single source used by events and formatting. */
+export function countFindingsBySeverity(
+  findings: readonly ReviewFinding[],
+): Record<ReviewSeverity, number> {
+  const counts: Record<ReviewSeverity, number> = { critical: 0, major: 0, minor: 0, nit: 0 };
+  for (const finding of findings) {
+    counts[finding.severity]++;
+  }
+  return counts;
+}
+
 /**
  * JSON Schema handed to the runtime (codex `--output-schema`) so the reviewer's
  * final message is structured. Runtime-agnostic: the adapter only writes it to

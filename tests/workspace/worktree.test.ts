@@ -12,6 +12,7 @@ import {
   findRepoRoot,
   getWorktreeDiff,
   getWorktreeStatus,
+  GitError,
   NotAGitRepositoryError,
   removeRunWorkspace,
   UnsafePathError,
@@ -118,6 +119,26 @@ describe("status and diff", () => {
     expect(diff).toContain("-initial");
     expect(diff).toContain("+changed");
   });
+
+  it("includes UNTRACKED files in the diff as synthetic new-file sections", async () => {
+    const repo = await makeTempRepo();
+    const workspace = await createRunWorkspace(repo, "run-u");
+    await writeFile(path.join(workspace.path, "created-by-agent.txt"), "hello\nworld\n");
+
+    const diff = await getWorktreeDiff(workspace.path);
+    expect(diff).toContain("diff --git a/created-by-agent.txt b/created-by-agent.txt");
+    expect(diff).toContain("new file mode 100644");
+    expect(diff).toContain("--- /dev/null");
+    expect(diff).toContain("+++ b/created-by-agent.txt");
+    expect(diff).toContain("+hello");
+    expect(diff).toContain("+world");
+  });
+
+  it("empty worktree produces an empty diff", async () => {
+    const repo = await makeTempRepo();
+    const workspace = await createRunWorkspace(repo, "run-e");
+    expect(await getWorktreeDiff(workspace.path)).toBe("");
+  });
 });
 
 describe("removeRunWorkspace", () => {
@@ -177,5 +198,37 @@ describe("removeRunWorkspace", () => {
 
     const status = await getWorktreeStatus(repo);
     expect(status.entries.map((e) => e.path)).toEqual(["local-only.txt"]);
+  });
+
+  it("tolerates a partial earlier cleanup (worktree gone, branch left behind)", async () => {
+    const repo = await makeTempRepo();
+    const workspace = await createRunWorkspace(repo, "run-7");
+    // simulate: worktree removed, branch deletion never happened
+    await execGit(["worktree", "remove", workspace.path], { cwd: repo });
+
+    await removeRunWorkspace(repo, "run-7"); // must delete the leftover branch, not throw
+
+    const { stdout: branches } = await execGit(["branch", "--list"], { cwd: repo });
+    expect(branches).not.toContain("conjunction/run-7");
+    expect(branches).toContain("main");
+  });
+
+  it("is idempotent: a second cleanup after a full first one is a no-op", async () => {
+    const repo = await makeTempRepo();
+    await createRunWorkspace(repo, "run-8");
+    await removeRunWorkspace(repo, "run-8");
+    await expect(removeRunWorkspace(repo, "run-8")).resolves.toBeUndefined();
+    const { stdout: branches } = await execGit(["branch", "--list"], { cwd: repo });
+    expect(branches).toContain("main");
+  });
+});
+
+describe("createRunWorkspace collisions", () => {
+  it("fails cleanly with a GitError when the branch/worktree already exists", async () => {
+    const repo = await makeTempRepo();
+    await createRunWorkspace(repo, "run-dup");
+    await expect(createRunWorkspace(repo, "run-dup")).rejects.toThrow(GitError);
+    // the original worktree is untouched
+    expect((await getWorktreeStatus(worktreePathForRun(repo, "run-dup"))).clean).toBe(true);
   });
 });

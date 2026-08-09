@@ -229,4 +229,32 @@ describe("Orchestrator review (lot 7)", () => {
     expect(run.state).toBe("cancelled");
     expect(run.review).toBeUndefined();
   });
+
+  it("reviewRun cannot run twice (run is terminal after the first)", async () => {
+    const { adapter } = scriptedAgent([
+      { exitCode: 0 },
+      { exitCode: 0, lastMessage: FINDINGS_JSON },
+    ]);
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { review: true });
+    await orchestrator.reviewRun(run.id, PACKET, { timeoutMs: 1_000 });
+    expect(run.state).toBe("completed");
+    await expect(orchestrator.reviewRun(run.id, PACKET, { timeoutMs: 1_000 })).rejects.toThrow(
+      RunNotExecutableError,
+    );
+  });
+
+  it("reviewer timeout is advisory (error recorded, run completes)", async () => {
+    const { adapter } = scriptedAgent([{ exitCode: 0 }, { exitCode: null, timedOut: true }]);
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { review: true });
+    await orchestrator.reviewRun(run.id, PACKET, { timeoutMs: 5_000 });
+    expect(run.state).toBe("completed");
+    expect(run.review?.error).toBe("reviewer timed out after 5000ms");
+    expect(orchestrator.events.ofType("review.completed")[0]?.payload.errored).toBe(true);
+  });
 });

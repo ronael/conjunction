@@ -16,6 +16,7 @@ export {
   assertTransition,
   canTransition,
   InvalidRunStateTransitionError,
+  isFailedVerificationResult,
   transitionRun,
   type AgentAttemptOutcome,
   type Attempt,
@@ -33,6 +34,7 @@ export {
 } from "./correction.js";
 export {
   buildReviewerPacket,
+  countFindingsBySeverity,
   DIFF_TRUNCATION_MARKER,
   parseReviewReport,
   REVIEW_DIFF_MAX_CHARS,
