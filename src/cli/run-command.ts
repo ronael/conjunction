@@ -17,6 +17,8 @@ import {
   createRunWorkspace,
   DirtyWorktreeError,
   findRepoRoot,
+  getCurrentBranch,
+  getHeadCommit,
   getWorktreeDiff,
   removeRunWorkspace,
 } from "../workspace/index.js";
@@ -225,6 +227,10 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
 
   try {
     throwIfAborted();
+    // record the landing base BEFORE the worktree forks from HEAD
+    // (see docs/land-spec.md §2: required for `conjunction land` guards)
+    run.baseBranch = await getCurrentBranch(repoRoot);
+    run.baseCommit = await getHeadCommit(repoRoot);
     await orchestrator.startRun(run.id);
     await flush(task, run);
     out(stepLine("✓", "Workspace ready", run.branch));

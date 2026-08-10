@@ -77,6 +77,12 @@ export interface ReviewStartedEvent
 export interface ReviewCompletedEvent
   extends EventBase<"review.completed", ReviewCompletedPayload>, RunScoped {}
 
+/** Landing record: emitted by the land command after a successful apply. */
+export interface RunLandedEvent
+  extends
+    EventBase<"run.landed", { targetBranch: string; targetCommit: string; patchPath: string }>,
+    RunScoped {}
+
 export type ConjunctionEvent =
   | TaskCreatedEvent
   | RunStartedEvent
@@ -93,7 +99,8 @@ export type ConjunctionEvent =
   | CorrectionStartedEvent
   | CorrectionCompletedEvent
   | ReviewStartedEvent
-  | ReviewCompletedEvent;
+  | ReviewCompletedEvent
+  | RunLandedEvent;
 
 export type ConjunctionEventType = ConjunctionEvent["type"];
 

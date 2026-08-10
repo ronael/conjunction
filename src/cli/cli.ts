@@ -15,11 +15,13 @@ usage:
   conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--timeout <minutes>] [--model <model>] [--cleanup]
                            [--plain] [--no-correct] [--review]
+  conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
   conjunction status [--repo <path>]
   conjunction doctor
 
 commands:
   run      execute a task in an isolated git worktree via the codex adapter
+  land     apply a completed run's changes onto your branch (uncommitted)
   status   list runs recorded under .conjunction/runs/
   doctor   check that the agent runtime (codex cli) is available
 
@@ -104,6 +106,31 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         } finally {
           process.removeListener("SIGINT", onSigint);
         }
+      }
+      case "land": {
+        const parsed = parseArgs(rest, {
+          valueOptions: ["repo", "branch"],
+          flags: ["cleanup", "help"],
+        });
+        if (parsed.flags.has("help")) {
+          out(USAGE);
+          return 0;
+        }
+        const runId = parsed.positionals[0];
+        if (runId === undefined) {
+          throw new UsageError("land requires a run id (see: conjunction status)");
+        }
+        const branch = parsed.options.branch?.at(-1);
+        const { landCommand } = await import("./land-command.js");
+        return await landCommand(
+          {
+            runId,
+            repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
+            cleanup: parsed.flags.has("cleanup"),
+            ...(branch !== undefined ? { branch } : {}),
+          },
+          { out },
+        );
       }
       case "status": {
         const parsed = parseArgs(rest, { valueOptions: ["repo"], flags: ["help"] });

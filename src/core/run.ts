@@ -114,6 +114,19 @@ export interface RunReview {
   /** Set when the reviewer invocation itself failed — advisory, run unaffected. */
   error?: string;
 }
+
+/**
+ * Post-terminal landing record (see docs/land-spec.md). Annotation only —
+ * `run.state` stays "completed"; landing is not a lifecycle state.
+ */
+export interface LandedRecord {
+  landedAt: string;
+  targetBranch: string;
+  /** Target branch HEAD at landing time (apply does not move it). */
+  targetCommit: string;
+  /** Saved landing patch; manual rollback is `git apply -R <patchPath>`. */
+  patchPath: string;
+}
 /**
  * One agent attempt within a run. Index 1 is the initial attempt; index 2 is
  * the (single, capped) correction attempt and carries the packet that was
@@ -148,6 +161,14 @@ export interface Run {
   verificationResult?: VerificationOutcome;
   /** Lot 7: independent reviewer outcome (advisory; only when --review). */
   review?: RunReview;
+  /**
+   * The branch/commit the user had checked out when the run started —
+   * the landing target. Missing in runs recorded before landing support.
+   */
+  baseBranch?: string;
+  baseCommit?: string;
+  /** Set by `conjunction land` after a successful landing. */
+  landed?: LandedRecord;
 }
 
 /**

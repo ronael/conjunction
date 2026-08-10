@@ -37,6 +37,33 @@ export class RunStore {
     );
   }
 
+  /** Load one stored run by full id or unique id prefix; undefined if not found/ambiguous. */
+  async get(runIdOrPrefix: string): Promise<StoredRun | undefined> {
+    try {
+      const raw = await readFile(path.join(this.dir, `${runIdOrPrefix}.json`), "utf8");
+      return JSON.parse(raw) as StoredRun;
+    } catch {
+      // fall through to prefix matching
+    }
+    let files: string[];
+    try {
+      files = await readdir(this.dir);
+    } catch {
+      return undefined;
+    }
+    const matches = files.filter(
+      (file) => file.endsWith(".json") && file.startsWith(runIdOrPrefix),
+    );
+    if (matches.length !== 1) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(await readFile(path.join(this.dir, matches[0] ?? ""), "utf8")) as StoredRun;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** All stored runs, newest first. Corrupt files are skipped. */
   async list(): Promise<StoredRun[]> {
     let files: string[];

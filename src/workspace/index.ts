@@ -1,10 +1,20 @@
 export {
   execGit,
   findRepoRoot,
+  getCurrentBranch,
+  getHeadCommit,
   GitError,
   NotAGitRepositoryError,
   type GitExecResult,
 } from "./git.js";
+export {
+  applyPatch,
+  assertLandPreflight,
+  checkPatchApplies,
+  generateLandingPatch,
+  LandError,
+  type LandPreflightInput,
+} from "./land.js";
 export {
   BRANCH_PREFIX,
   branchNameForRun,

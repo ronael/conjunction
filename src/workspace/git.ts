@@ -83,3 +83,18 @@ export async function findRepoRoot(cwd: string): Promise<string> {
     throw error;
   }
 }
+
+/**
+ * The branch currently checked out at `cwd`, or "HEAD" when detached
+ * (callers that need a branch must refuse detached HEAD explicitly).
+ */
+export async function getCurrentBranch(cwd: string): Promise<string> {
+  const { stdout } = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+  return stdout.trim();
+}
+
+/** The full sha of HEAD at `cwd`. */
+export async function getHeadCommit(cwd: string): Promise<string> {
+  const { stdout } = await execGit(["rev-parse", "HEAD"], { cwd });
+  return stdout.trim();
+}

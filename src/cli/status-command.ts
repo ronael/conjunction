@@ -28,10 +28,11 @@ export async function statusCommand(
     const attempts = attemptCount > 1 ? ` (${attemptCount} attempts)` : "";
     const findingCount = run.review?.findings?.length ?? 0;
     const findings = findingCount > 0 ? ` · ${findingCount} findings` : "";
+    const landed = run.landed !== undefined ? ` · landed→${run.landed.targetBranch}` : "";
     out(
       `${stateSymbol(run.state)} ${run.id.slice(0, 8)}  ` +
         `${stateLabel(run.state).padEnd(9)}  ${run.runtime}  ${run.createdAt}  ` +
-        `${task.title}${attempts}${findings}\n`,
+        `${task.title}${attempts}${findings}${landed}\n`,
     );
     if (run.branch !== undefined) {
       out(`   ${"Branch".padEnd(9)}${run.branch}\n`);

@@ -581,6 +581,196 @@ describe("cli run — audit error paths", () => {
   });
 });
 
+describe("cli land", () => {
+  /** Runs a task to completion with the given stub, returns the runId. */
+  async function completedRun(repo: string, stub = fileCreatingStub): Promise<string> {
+    const io = capture();
+    const code = await cli(["run", "create hello.txt", "--repo", repo, "--plain"], {
+      adapter: stub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    const [runId] = await storedRunIds(repo);
+    expect(runId).toBeDefined();
+    return runId ?? "";
+  }
+
+  async function storedRun(repo: string, runId: string) {
+    return JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as {
+      run: {
+        state: string;
+        baseBranch?: string;
+        baseCommit?: string;
+        landed?: { targetBranch: string; targetCommit: string; patchPath: string };
+      };
+    };
+  }
+
+  it("happy path: applies changes uncommitted, records landing, works by id prefix", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+
+    // base fields were recorded at run start
+    const before = await storedRun(repo, runId);
+    expect(before.run.baseBranch).toBe("main");
+    expect(before.run.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+
+    const io = capture();
+    const code = await cli(["land", runId.slice(0, 8), "--repo", repo], { out: io.out });
+    expect(code).toBe(0);
+    const text = io.text();
+    expect(text).toContain("✓ Preflight passed");
+    expect(text).toContain("✓ Applied");
+    expect(text).toContain("Landed:    main");
+    expect(text).toContain("Rollback:  git apply -R");
+
+    // the change landed as UNCOMMITTED content in the user's tree
+    expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+    expect((await execGit(["status", "--porcelain"], { cwd: repo })).stdout).toContain(
+      "?? hello.txt",
+    );
+
+    // run JSON annotated + event appended
+    const after = await storedRun(repo, runId);
+    expect(after.run.landed?.targetBranch).toBe("main");
+    expect(after.run.landed?.patchPath).toContain(".landing.patch");
+    const events = await readFile(
+      path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+      "utf8",
+    );
+    expect(events).toContain('"run.landed"');
+
+    // status reflects the landing
+    const statusIo = capture();
+    await cli(["status", "--repo", repo], { out: statusIo.out });
+    expect(statusIo.text()).toContain("landed→main");
+  });
+
+  it("refuses to land twice", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    expect(await cli(["land", runId, "--repo", repo], { out: capture().out })).toBe(0);
+    const io = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io.out })).toBe(1);
+    expect(io.text()).toContain("already landed");
+  });
+
+  it("refuses non-completed runs", async () => {
+    const repo = await makeTempRepo();
+    const failingStub = stubAdapter(() => Promise.resolve({ exitCode: 2 }));
+    const io0 = capture();
+    await cli(["run", "do something", "--repo", repo], { adapter: failingStub, out: io0.out });
+    const [runId] = await storedRunIds(repo);
+
+    const io = capture();
+    expect(await cli(["land", runId ?? "", "--repo", repo], { out: io.out })).toBe(1);
+    expect(io.text()).toContain("only completed runs can be landed");
+  });
+
+  it("refuses when the worktree was cleaned up", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    const { removeRunWorkspace } = await import("../../src/workspace/index.js");
+    await removeRunWorkspace(repo, runId, { force: true });
+
+    const io = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io.out })).toBe(1);
+    expect(io.text()).toContain("worktree is gone");
+  });
+
+  it("refuses a dirty target tree and names the files", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    await writeFile(path.join(repo, "README.md"), "user dirty edit\n");
+
+    const io = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io.out })).toBe(1);
+    expect(io.text()).toContain("uncommitted changes");
+    expect(io.text()).toContain("README.md");
+  });
+
+  it("fails atomically on conflict: target untouched, patch preserved", async () => {
+    const repo = await makeTempRepo();
+    const editingStub = stubAdapter(async (input) => {
+      await writeFile(path.join(input.workspacePath, "README.md"), "agent change\n");
+      return {};
+    });
+    const runId = await completedRun(repo, editingStub);
+
+    // the user diverged AND COMMITTED on the same file after the run started
+    await writeFile(path.join(repo, "README.md"), "user committed change\n");
+    await execGit(["add", "README.md"], { cwd: repo });
+    await execGit(["commit", "-m", "user work"], { cwd: repo });
+
+    const io = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io.out })).toBe(1);
+    const text = io.text();
+    expect(text).toContain("does not apply cleanly");
+    expect(text).toContain("patch was preserved");
+    expect(await readFile(path.join(repo, "README.md"), "utf8")).toBe("user committed change\n");
+  });
+
+  it("old run JSON without baseBranch: refuses without --branch, lands with it", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+
+    // simulate a pre-landing run record
+    const jsonPath = path.join(repo, ".conjunction", "runs", `${runId}.json`);
+    const stored = JSON.parse(await readFile(jsonPath, "utf8")) as Record<string, unknown>;
+    const run = stored.run as Record<string, unknown>;
+    delete run.baseBranch;
+    delete run.baseCommit;
+    await writeFile(jsonPath, JSON.stringify(stored, null, 2) + "\n");
+
+    const io1 = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io1.out })).toBe(1);
+    expect(io1.text()).toContain("pass --branch");
+
+    const io2 = capture();
+    expect(await cli(["land", runId, "--repo", repo, "--branch", "main"], { out: io2.out })).toBe(
+      0,
+    );
+    expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+
+  it("warns on reviewer error but proceeds (review is advisory)", async () => {
+    const repo = await makeTempRepo();
+    const crashingReviewerStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        return { exitCode: 1 };
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hello conjunction\n");
+      return {};
+    });
+    const io0 = capture();
+    await cli(["run", "create hello.txt", "--repo", repo, "--review"], {
+      adapter: crashingReviewerStub,
+      out: io0.out,
+    });
+    const [runId] = await storedRunIds(repo);
+
+    const io = capture();
+    const code = await cli(["land", runId ?? "", "--repo", repo], { out: io.out });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("warning: the reviewer for this run errored");
+    expect(io.text()).toContain("✓ Applied");
+  });
+
+  it("--cleanup removes worktree and branch after a successful land", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    const io = capture();
+    expect(await cli(["land", runId, "--repo", repo, "--cleanup"], { out: io.out })).toBe(0);
+    expect(io.text()).toContain("Cleanup:   worktree and branch removed");
+    const { stdout: branches } = await execGit(["branch", "--list"], { cwd: repo });
+    expect(branches).not.toContain(`conjunction/${runId}`);
+    // the landed change stays
+    expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+});
+
 describe("cli status / doctor / usage", () => {
   it("status lists recorded runs", async () => {
     const repo = await makeTempRepo();

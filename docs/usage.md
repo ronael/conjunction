@@ -146,7 +146,79 @@ continues with a warning and no metadata):
 - `.conjunction/runs/<runId>.events.jsonl` — the full event stream
   (`task.created`, `run.started`, `workspace.created`, `agent.started`,
   `agent.output`, `agent.completed`, `verification.*`, `correction.*`,
-  `review.*`, `run.completed/failed/cancelled`).
+  `review.*`, `run.landed`, `run.completed/failed/cancelled`).
+
+### `conjunction land <runId>`
+
+Applies a **completed** run's changes onto your current branch as
+**uncommitted** working-tree changes (strategy A — atomic patch/apply, see
+`docs/land-spec.md`). It never commits, never stages, and never moves your
+branch: you review and commit the result yourself.
+
+```bash
+conjunction land <runId> [--branch <target>] [--cleanup]
+```
+
+What happens, step by step:
+
+1. **Guards** — the run must exist, be `COMPLETED` (not failed/cancelled/
+   in-progress), and not already landed. The run's worktree must still exist
+   (the changes live there — see _run_ below). Without `--branch`, the target
+   is the run's recorded `baseBranch`; a run recorded before landing support
+   has no `baseBranch` and requires an explicit `--branch`.
+2. **Preflight** — checks the branch checked out at the repo root matches the
+   target, and that the target tree is **clean**. A dirty tree is refused with
+   each offending file named (no auto-stash — commit or stash first).
+   Metdata under `.conjunction/` doesn't count as dirty.
+3. **Generate the patch** — inside the run's worktree: `git add -N .` +
+   `git diff --binary HEAD`, producing one git-native patch covering new
+   files (incl. binaries), edits, renames and deletions. Saved to
+   `.conjunction/runs/<runId>.landing.patch`.
+4. **`git apply --check`** — if the patch doesn't apply cleanly (e.g. the
+   target branch diverged on the same files since the run started),
+   **nothing is written** and the conflicting files are reported. The patch is
+   preserved for manual handling.
+5. **`git apply --binary`** — applies as uncommitted changes in your tree.
+6. **Record the landing** — annotates the run JSON with
+   `landed { targetBranch, targetCommit, patchPath }` and appends a
+   `run.landed` event to the JSONL stream. `run.status` stays `completed`.
+
+```bash
+# land the most recent run, identified by its id prefix (see: status)
+$ conjunction land bfa1b6a3 --repo /path/to/repo
+✓ Preflight passed          main, clean tree
+✓ Patch generated           …/.conjunction/runs/<runId>.landing.patch
+✓ Applied                   main (uncommitted)
+
+── summary ──
+Run:       bfa1b6a3-…
+Task:      create a file hello.txt …
+Landed:    main @ abc12345 (uncommitted changes)
+Patch:     …/.conjunction/runs/<runId>.landing.patch
+Rollback:  git apply -R …/.conjunction/runs/<runId>.landing.patch
+Cleanup:   worktree preserved (use --cleanup to remove it)
+```
+
+Options:
+
+- `--branch <target>` — land onto an explicit branch instead of the recorded
+  `baseBranch`; the branch must be checked out at the repo root. **Required**
+  for runs recorded before landing support.
+- `--cleanup` — after a successful landing, remove the run's worktree and
+  branch. This is the one case force-cleanup is justified, because the work is
+  now provably present in your tree.
+
+Reference points:
+
+- The landing is **atomic**: if any file conflicts, the whole apply fails and
+  your tree is untouched — there is never a silent partial state.
+- Rollback is `git apply -R` on the saved patch (safe only if you haven't
+  edited those files since).
+- Re-landing a run is refused (`already landed`). Landing a run whose worktree
+  was cleaned up is refused (nothing to land).
+- Reviewer findings are advisory: landing proceeds but prints a warning (with
+  a loud note for `critical` findings or a reviewer crash). This is a visible
+  note only — review never blocks landing, matching its advisory role.
 
 ### `conjunction status`
 
@@ -196,3 +268,9 @@ Cleanup:   worktree preserved for inspection (use --cleanup to attempt removal)
   git commands; your current branch is never touched.
 - Cleanup goes through the safe path: dirty worktrees are refused unless you
   remove them manually.
+- Each run records the branch and commit you had checked out when it started
+  (`baseBranch`/`baseCommit`) — the landing target for `conjunction land`.
+- Landing (`conjunction land`) never commits or stages: it produces
+  uncommitted changes you inspect and commit yourself. It refuses a dirty
+  target tree, refuses to land onto a branch you don't have checked out, and
+  is atomic (a conflicting patch writes nothing).

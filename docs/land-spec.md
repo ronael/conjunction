@@ -1,6 +1,7 @@
 # Mini-spec: `land` — getting a run's changes onto the user's branch
 
-Status: **specification only — no code in this lot.**
+Status: **implemented on `feat/land` (see §7 for how the code matches).**
+Scope: v1 of `conjunction land <runId>`.
 Scope: v1 of `conjunction land <runId>`. Safety bar: never lose or corrupt the
 user's work, never leave a silent partial state, simple rollback, honest
 conflict reporting.
@@ -284,13 +285,13 @@ usual "apply can't do untracked" objection does not apply.
   `--branch`; runs persisted before `baseBranch` existed require `--branch`.
 - **No re-land** — `run.landed` guard; no "force re-apply" flag.
 
-## 9. Open questions
+## 9. Resolved questions
 
-1. Should a successful `--cleanup` after landing also be the default when
-   `land` succeeds (i.e. opt-out `--keep` instead of opt-in `--cleanup`)?
-   v1 keeps the current preserve-by-default posture.
-2. Should `run` gain a `--land` convenience flag later (land automatically on
-   success)? Deferred — it weakens the inspection step.
-3. Reviewer-errored runs are `completed` and thus landable. Acceptable
-   (review is advisory), but should `land` print a louder note when
-   `run.review.error` or unresolved `critical` findings exist?
+1. **`--cleanup` vs `--keep` default?** Resolved: preserve-by-default, explicit
+   `--cleanup` opt-in (matches the implemented code). A future opt-out `--keep`
+   is possible but v1 keeps the conservative posture.
+2. **`run --land` convenience flag?** Deferred — it weakens the inspection
+   step; landing stays a separate command.
+3. **Reviewer-errored runs landable?** Resolved: yes, advisory — but `land`
+   prints a loud warning (`reviewer errored` / `critical findings`) while
+   proceeding, as implemented in `land-command.ts` (§7).
