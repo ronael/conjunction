@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import type { AgentAdapter, AgentRunInput, AgentRunResult } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
+import { buildWorkerInstructions } from "./instructions.js";
+import type { ExecutionTarget, Invocation, ReasoningEffort } from "./invocation.js";
 import { parseReviewReport, countFindingsBySeverity, REVIEW_OUTPUT_SCHEMA } from "./review.js";
 import {
   isFailedVerificationResult,
@@ -124,14 +126,17 @@ export class Orchestrator {
   }
 
   /** `workflow` records which participants this run selects; see workflow.ts. */
-  createRun(taskId: string, runtime: string, workflow?: WorkflowName): Run {
+  createRun(taskId: string, target: string | ExecutionTarget, workflow?: WorkflowName): Run {
     const task = this.#requireTask(taskId);
+    const executionTarget = typeof target === "string" ? { runtime: target } : target;
     const run: Run = {
       id: this.#createId(),
       taskId: task.id,
-      runtime,
+      runtime: executionTarget.runtime,
+      target: executionTarget,
       createdAt: this.#timestamp(),
       state: "pending",
+      invocations: [],
       attempts: [],
     };
     if (workflow !== undefined) {
@@ -206,7 +211,11 @@ export class Orchestrator {
       throw new RunNotExecutableError(`state must be "correcting", got "${run.state}"`);
     }
     const failedCommands = failedCommandNames(run);
-    const result = await this.#executeAgentAttempt(run, task, options, packet);
+    const parentInvocationId = run.attempts[0]?.invocationId;
+    const result = await this.#executeAgentAttempt(run, task, options, {
+      instructions: packet,
+      ...(parentInvocationId !== undefined ? { parentInvocationId } : {}),
+    });
     if (!result.aborted && !result.timedOut && result.exitCode === 0) {
       this.#emit({
         type: "correction.completed",
@@ -227,7 +236,13 @@ export class Orchestrator {
     run: Run,
     task: Task,
     options: ExecuteRunOptions,
-    correctionPacket?: string,
+    inputOptions?: {
+      instructions?: string;
+      parentInvocationId?: string;
+      role?: "worker" | "critic";
+      readOnly?: boolean;
+      outputSchema?: unknown;
+    },
   ): Promise<AgentRunResult> {
     if (!this.deps.agent) {
       throw new MissingDependencyError("agent");
@@ -238,9 +253,31 @@ export class Orchestrator {
       );
     }
 
-    const attempt: Attempt = { index: run.attempts.length + 1, startedAt: this.#timestamp() };
-    if (correctionPacket !== undefined) {
-      attempt.correctionPacket = correctionPacket;
+    const invocationOptions: {
+      parentInvocationId?: string;
+      readOnly?: boolean;
+    } = {};
+    if (inputOptions?.parentInvocationId !== undefined) {
+      invocationOptions.parentInvocationId = inputOptions.parentInvocationId;
+    }
+    if (inputOptions?.readOnly !== undefined) {
+      invocationOptions.readOnly = inputOptions.readOnly;
+    }
+    const invocation = this.#createInvocation(
+      run,
+      inputOptions?.role ?? "worker",
+      invocationOptions,
+    );
+    invocation.state = "running";
+    invocation.startedAt = this.#timestamp();
+
+    const attempt: Attempt = {
+      index: run.attempts.length + 1,
+      invocationId: invocation.id,
+      startedAt: invocation.startedAt,
+    };
+    if (inputOptions?.instructions !== undefined) {
+      attempt.correctionPacket = inputOptions.instructions;
     }
     run.attempts.push(attempt);
 
@@ -248,11 +285,11 @@ export class Orchestrator {
       type: "agent.started",
       taskId: run.taskId,
       runId: run.id,
-      payload: { runtime: run.runtime },
+      payload: { runtime: invocation.target.runtime, invocationId: invocation.id },
     });
 
     const input: AgentRunInput = {
-      task,
+      instructions: inputOptions?.instructions ?? buildWorkerInstructions(task),
       workspacePath: run.workspacePath,
       timeoutMs: options.timeoutMs,
       onOutput: (chunk, stream) => {
@@ -268,8 +305,11 @@ export class Orchestrator {
     if (options.signal !== undefined) {
       input.signal = options.signal;
     }
-    if (correctionPacket !== undefined) {
-      input.promptOverride = correctionPacket;
+    if (inputOptions?.readOnly !== undefined) {
+      input.readOnly = inputOptions.readOnly;
+    }
+    if (inputOptions?.outputSchema !== undefined) {
+      input.outputSchema = inputOptions.outputSchema;
     }
 
     const result = await this.deps.agent.run(input);
@@ -283,23 +323,34 @@ export class Orchestrator {
     if (result.lastMessage !== undefined) {
       attempt.agentResult.summary = result.lastMessage;
     }
+    invocation.completedAt = attempt.completedAt;
+    invocation.outcome = attempt.agentResult;
 
     this.#emit({
       type: "agent.completed",
       taskId: run.taskId,
       runId: run.id,
-      payload: { exitCode: result.exitCode },
+      payload: { exitCode: result.exitCode, invocationId: invocation.id },
     });
     if (result.lastMessage !== undefined) {
       run.result = { summary: result.lastMessage };
     }
 
     if (result.aborted) {
+      invocation.state = "cancelled";
+      invocation.terminationReason = "aborted";
       this.cancelRun(run.id, "agent execution aborted");
     } else if (result.timedOut) {
+      invocation.state = "failed";
+      invocation.terminationReason = "timed_out";
       this.failRun(run.id, `agent timed out after ${options.timeoutMs}ms`);
     } else if (result.exitCode !== 0) {
+      invocation.state = "failed";
+      invocation.terminationReason = "process_failed";
       this.failRun(run.id, `agent exited with code ${result.exitCode ?? "null (killed)"}`);
+    } else {
+      invocation.state = "completed";
+      invocation.terminationReason = "completed";
     }
     return result;
   }
@@ -449,18 +500,25 @@ export class Orchestrator {
     }
 
     this.#emit({ type: "review.started", taskId: run.taskId, runId: run.id, payload: {} });
+    const parentInvocationId = run.attempts.at(-1)?.invocationId;
+    const invocation = this.#createInvocation(run, "critic", {
+      ...(parentInvocationId !== undefined ? { parentInvocationId } : {}),
+      readOnly: true,
+    });
+    invocation.state = "running";
+    invocation.startedAt = this.#timestamp();
+
     this.#emit({
       type: "agent.started",
       taskId: run.taskId,
       runId: run.id,
-      payload: { runtime: run.runtime },
+      payload: { runtime: invocation.target.runtime, invocationId: invocation.id },
     });
 
     const input: AgentRunInput = {
-      task,
+      instructions: packet,
       workspacePath: run.workspacePath,
       timeoutMs: options.timeoutMs,
-      promptOverride: packet,
       readOnly: true, // hard rule: the reviewer NEVER gets write access
       outputSchema: REVIEW_OUTPUT_SCHEMA,
       onOutput: (chunk, stream) => {
@@ -483,14 +541,21 @@ export class Orchestrator {
       timedOut: result.timedOut,
       aborted: result.aborted,
     };
+    if (result.lastMessage !== undefined) {
+      agentResult.summary = result.lastMessage;
+    }
+    invocation.completedAt = this.#timestamp();
+    invocation.outcome = agentResult;
     this.#emit({
       type: "agent.completed",
       taskId: run.taskId,
       runId: run.id,
-      payload: { exitCode: result.exitCode },
+      payload: { exitCode: result.exitCode, invocationId: invocation.id },
     });
 
     if (result.aborted) {
+      invocation.state = "cancelled";
+      invocation.terminationReason = "aborted";
       this.cancelRun(run.id, "review aborted");
       return run;
     }
@@ -509,6 +574,8 @@ export class Orchestrator {
         error,
       };
       counts.errored = true;
+      invocation.state = "failed";
+      invocation.terminationReason = result.timedOut ? "timed_out" : "process_failed";
     } else {
       const parsed = parseReviewReport(result.lastMessage ?? "");
       run.review = {
@@ -520,6 +587,8 @@ export class Orchestrator {
       };
       counts.total = parsed.report.findings.length;
       Object.assign(counts, countFindingsBySeverity(parsed.report.findings));
+      invocation.state = "completed";
+      invocation.terminationReason = "completed";
     }
     this.#emit({
       type: "review.completed",
@@ -551,6 +620,33 @@ export class Orchestrator {
 
   #timestamp(): string {
     return this.#now().toISOString();
+  }
+
+  #createInvocation(
+    run: Run,
+    role: Invocation["role"],
+    options: {
+      parentInvocationId?: string;
+      reasoningEffort?: ReasoningEffort;
+      readOnly?: boolean;
+    } = {},
+  ): Invocation {
+    const invocation: Invocation = {
+      id: this.#createId(),
+      runId: run.id,
+      ...(options.parentInvocationId !== undefined
+        ? { parentInvocationId: options.parentInvocationId }
+        : {}),
+      role,
+      target: run.target ?? { runtime: run.runtime },
+      reasoningEffort: options.reasoningEffort ?? "medium",
+      createdAt: this.#timestamp(),
+      state: "pending",
+      ...(options.readOnly !== undefined ? { readOnly: options.readOnly } : {}),
+    };
+    run.invocations ??= [];
+    run.invocations.push(invocation);
+    return invocation;
   }
 
   #emit(input: EventInput): void {

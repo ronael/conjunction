@@ -12,7 +12,6 @@ import type {
   AgentRunResult,
 } from "../../core/index.js";
 
-import { buildPrompt } from "./prompt.js";
 import { defaultSpawner, type ProcessSpawner } from "./process.js";
 
 const execFileAsync = promisify(execFile);
@@ -86,9 +85,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
-    // A packet (correction or reviewer) replaces the task-derived prompt — it
-    // already carries the task framing and the workspace/git safety rules.
-    const prompt = input.promptOverride ?? buildPrompt(input.task);
+    const prompt = input.instructions;
     const lastMessageFile = path.join(tmpdir(), `conjunction-codex-${randomUUID()}.txt`);
 
     // Lot 7: the reviewer runs read-only — the ONLY two sandbox values this

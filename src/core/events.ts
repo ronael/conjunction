@@ -26,13 +26,15 @@ export interface WorkspaceCreatedEvent
   extends EventBase<"workspace.created", { workspacePath: string; branch: string }>, RunScoped {}
 
 export interface AgentStartedEvent
-  extends EventBase<"agent.started", { runtime: string }>, RunScoped {}
+  extends EventBase<"agent.started", { runtime: string; invocationId: string }>, RunScoped {}
 
 export interface AgentOutputEvent
   extends EventBase<"agent.output", { stream: "stdout" | "stderr"; chunk: string }>, RunScoped {}
 
 export interface AgentCompletedEvent
-  extends EventBase<"agent.completed", { exitCode: number | null }>, RunScoped {}
+  extends
+    EventBase<"agent.completed", { exitCode: number | null; invocationId: string }>,
+    RunScoped {}
 
 export interface VerificationStartedEvent
   extends EventBase<"verification.started", Record<string, never>>, RunScoped {}

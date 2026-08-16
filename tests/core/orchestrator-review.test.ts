@@ -113,8 +113,15 @@ describe("Orchestrator review (lot 7)", () => {
     const reviewInput = inputs[1];
     expect(reviewInput?.readOnly).toBe(true);
     expect(reviewInput?.outputSchema).toBe(REVIEW_OUTPUT_SCHEMA);
-    expect(reviewInput?.promptOverride).toBe(PACKET);
+    expect(reviewInput?.instructions).toBe(PACKET);
     expect(run.attempts).toHaveLength(1);
+    expect(run.invocations?.map((invocation) => invocation.role)).toEqual(["worker", "critic"]);
+    expect(run.invocations?.[1]).toMatchObject({
+      parentInvocationId: run.invocations?.[0]?.id,
+      readOnly: true,
+      state: "completed",
+      terminationReason: "completed",
+    });
 
     expect(run.review?.structured).toBe(true);
     expect(run.review?.summary).toBe("ok with remarks");

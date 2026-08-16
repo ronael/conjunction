@@ -97,6 +97,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           verifyCommands,
           timeoutMinutes,
           cleanup: parsed.flags.has("cleanup"),
+          ...(model !== undefined ? { model } : {}),
           // correction only makes sense with something to correct against
           correct: verifyCommands.length > 0 && !parsed.flags.has("no-correct"),
         };

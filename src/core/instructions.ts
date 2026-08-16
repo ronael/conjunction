@@ -1,10 +1,10 @@
-import { objectiveSection, type Task } from "../../core/index.js";
+import { objectiveSection, type Task } from "./task.js";
 
 /**
- * Deterministic prompt built from a Task. No model-specific cleverness: the
- * same structure for every run so behavior is inspectable and reproducible.
+ * Deterministic worker instructions built by Conjunction before the adapter
+ * boundary. Adapters transmit this string; they do not interpret Task.
  */
-export function buildPrompt(task: Task): string {
+export function buildWorkerInstructions(task: Task): string {
   const lines: string[] = [
     "You are executing a task inside an isolated git worktree managed by Conjunction,",
     "an orchestration runtime for coding agents.",

@@ -77,8 +77,16 @@ describe("Orchestrator.executeRun", () => {
 
     const input = inputs[0];
     expect(input?.workspacePath).toBe(`/tmp/wt/${run.id}`);
-    expect(input?.task.objective).toBe("do the thing");
+    expect(input?.instructions).toContain("do the thing");
     expect(input?.timeoutMs).toBe(60_000);
+    expect(run.invocations).toHaveLength(1);
+    expect(run.invocations?.[0]).toMatchObject({
+      role: "worker",
+      target: { runtime: "stub-agent" },
+      reasoningEffort: "medium",
+      state: "completed",
+      terminationReason: "completed",
+    });
 
     expect(orchestrator.events.all().map((e) => e.type)).toEqual([
       "task.created",

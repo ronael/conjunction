@@ -295,8 +295,8 @@ Every run writes into `<repoRoot>/.conjunction/`:
 ```
 .conjunction/
 ├── runs/
-│   ├── <runId>.json            # task + run metadata (state, attempts, review,
-│   │                           #   baseBranch, baseCommit, landed, ...)
+│   ├── <runId>.json            # task + run metadata (state, invocations,
+│   │                           #   attempts, review, baseBranch, landed, ...)
 │   ├── <runId>.events.jsonl    # the full event stream
 │   └── <runId>.landing.patch   # saved by `land` (used for apply/rollback)
 └── worktrees/
@@ -311,7 +311,8 @@ cat .conjunction/runs/<runId>.json | python3 -m json.tool
 
 Notable fields: `state` (`running` → `completed`/`failed`/`cancelled`),
 `baseBranch`/`baseCommit` (the target you had checked out at run start),
-`landed` (set after a successful `land`), `attempts[]`, `review`.
+`landed` (set after a successful `land`), `invocations[]`, `attempts[]`,
+`review`.
 
 The JSONL file is an append-only timeline of events: `task.created`,
 `run.started`, `workspace.created`, `agent.started`, `agent.output`,

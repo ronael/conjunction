@@ -114,8 +114,10 @@ describe("Orchestrator correction loop (lot 6)", () => {
 
     // the correction attempt received the packet as its prompt override
     expect(inputs).toHaveLength(2);
-    expect(inputs[0]?.promptOverride).toBeUndefined();
-    expect(inputs[1]?.promptOverride).toBe(PACKET);
+    expect(inputs[0]?.instructions).toContain("do the thing");
+    expect(inputs[1]?.instructions).toBe(PACKET);
+    expect(run.invocations?.map((invocation) => invocation.role)).toEqual(["worker", "worker"]);
+    expect(run.invocations?.[1]?.parentInvocationId).toBe(run.invocations?.[0]?.id);
 
     expect(orchestrator.events.all().map((e) => e.type)).toEqual([
       "task.created",

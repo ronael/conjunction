@@ -58,6 +58,8 @@ export interface RunTaskOptions {
   brief: Brief;
   /** Which participants take part. Correction is orthogonal (see `correct`). */
   workflow: WorkflowName;
+  /** Optional model id recorded on the execution target; adapters map it separately. */
+  model?: string;
   repoPath: string;
   /** Empty list = no verification; the run still completes (vacuous pass). */
   verifyCommands: VerificationCommand[];
@@ -219,7 +221,11 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     objective: brief.content,
     source: brief.source,
   });
-  const run = orchestrator.createRun(task.id, adapter.id, options.workflow);
+  const run = orchestrator.createRun(
+    task.id,
+    options.model !== undefined ? { runtime: adapter.id, model: options.model } : adapter.id,
+    options.workflow,
+  );
   out(`run:      ${run.id}\ntask:     ${task.title}\n`);
   if (brief.source.kind === "file") {
     out(`brief:    ${brief.source.path}\n`);

@@ -146,12 +146,12 @@ worktree:
 3. verification re-runs. The result is terminal: `completed` or `failed`.
    There is no third attempt, ever.
 
-Both attempts are recorded on the run (`attempts` in the run JSON, plus
-`correction.started` / `correction.completed` events). Plain output marks the
-boundary with `── correction (attempt 2/2) ──`; the TUI adds a
-`Correction (attempt 2)` checklist step. `--no-correct` disables the loop;
-without `--verify` there is nothing to correct against and no correction
-happens.
+Both attempts are recorded on the run (`attempts` for compatibility and
+`invocations` as the V1 execution model, plus `correction.started` /
+`correction.completed` events). Plain output marks the boundary with
+`── correction (attempt 2/2) ──`; the TUI adds a `Correction (attempt 2)`
+checklist step. `--no-correct` disables the loop; without `--verify` there is
+nothing to correct against and no correction happens.
 
 ## Interactive TUI
 
@@ -212,8 +212,8 @@ error (not a git repo, agent runtime unavailable, …).
 Every run writes (best-effort: if the directory is not writable the run
 continues with a warning and no metadata):
 
-- `.conjunction/runs/<runId>.json` — task + run metadata, rewritten at each
-  state change;
+- `.conjunction/runs/<runId>.json` — task + run metadata, including explicit
+  agent `invocations`, rewritten at each state change;
 - `.conjunction/runs/<runId>.events.jsonl` — the full event stream
   (`task.created`, `run.started`, `workspace.created`, `agent.started`,
   `agent.output`, `agent.completed`, `verification.*`, `correction.*`,

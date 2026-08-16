@@ -1,4 +1,5 @@
 import type { ReviewFinding } from "./review.js";
+import type { ExecutionTarget, Invocation } from "./invocation.js";
 import type { WorkflowName } from "./workflow.js";
 
 /**
@@ -135,6 +136,8 @@ export interface LandedRecord {
  */
 export interface Attempt {
   index: number;
+  /** Missing on runs persisted before the Invocation model existed. */
+  invocationId?: string;
   startedAt: string;
   completedAt?: string;
   agentResult?: AgentAttemptOutcome;
@@ -149,8 +152,10 @@ export interface Attempt {
 export interface Run {
   readonly id: string;
   readonly taskId: string;
-  /** Free-form runtime identifier (e.g. "codex-cli"). */
+  /** Legacy convenience field for old status/UI surfaces; use invocations[].target for V1. */
   runtime: string;
+  /** Default target used by the current single-runtime workflow. */
+  target?: ExecutionTarget;
   /**
    * Which participants took part. Absent on runs recorded before workflow
    * support — those behaved as "single" unless `run.review` is set.
@@ -162,6 +167,8 @@ export interface Run {
   startedAt?: string;
   completedAt?: string;
   state: RunState;
+  /** Explicit record of every agent execution in this run. */
+  invocations?: Invocation[];
   attempts: Attempt[];
   result?: RunResult;
   verificationResult?: VerificationOutcome;

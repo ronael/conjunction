@@ -87,8 +87,9 @@ strict dependency direction enforced by convention:
 ## Not implemented yet (explicit)
 
 - Multi-agent orchestration, planner, scheduler, message bus. The role/workflow
-  vocabulary exists (`src/core/workflow.ts`) but there is no `lead` role and no
-  Supervisor; `docs/brief-workflow-design.md` §8 specifies the next slice.
+  vocabulary exists (`src/core/workflow.ts`) and names the future coordinator
+  role `driver`, but no Driver invocation is produced yet;
+  `docs/brief-workflow-design.md` §8 specifies the next slice.
 - Additional agent adapters (claude-code, opencode, …); only codex exists.
 - Landing changes (committing/merging a run's worktree diff to the user's branch).
 - Configuration file (`conjunction.toml` or similar) — verification commands are
@@ -190,8 +191,9 @@ Design:
   20k chars each); passing checks summarized in one line; explicit "fix, don't redo"
   framing; the same workspace/git-safety rules as the initial prompt. The previous
   agent transcript is never included.
-- **Adapter seam**: `AgentRunInput.promptOverride` replaces the task-derived
-  prompt when set — prompt ownership stays in the adapter.
+- **Adapter seam:** superseded by V1 Lot 1. Conjunction now passes prepared
+  `AgentRunInput.instructions`; adapters no longer know how `Task` becomes
+  prompt text.
 - **CLI**: correction is on by default when at least one `--verify` is given
   (`--no-correct` disables; no verification → nothing to correct against). Plain
   mode logs `--- correction (attempt 2/2) ---` boundaries; the TUI shows a
@@ -217,11 +219,11 @@ Design:
    feed the correction loop. Reopening self-healing via review findings is
    explicitly future work (a bounded review-driven second correction would need
    a separate cap, not a loosening of `MAX_CORRECTIONS_PER_RUN`).
-4. **Same adapter, read-only, structured.** `AgentRunInput` gained
-   `promptOverride` (renamed from `correctionPacket` — it now serves both
-   packets), `readOnly` (codex maps to `-s read-only`; the adapter can only ever
-   emit `workspace-write` or `read-only`) and `outputSchema` (runtime-agnostic
-   JSON Schema; codex writes it to a temp file and passes `--output-schema`).
+4. **Same adapter, read-only, structured.** `AgentRunInput` carries prepared
+   `instructions`, `readOnly` (codex maps to `-s read-only`; the adapter can
+   only ever emit `workspace-write` or `read-only`) and `outputSchema`
+   (runtime-agnostic JSON Schema; codex writes it to a temp file and passes
+   `--output-schema`).
    The reviewer's prompt (`buildReviewerPacket`, pure) carries objective +
    constraints + acceptance criteria + the bounded worktree diff (2000 lines /
    100k chars, truncation marker) + a one-line-per-command verification summary.
@@ -254,10 +256,11 @@ in the architecture:
   content is not stored twice: `task.objective` is what actually reached the
   prompts.
 - **`src/core/workflow.ts`** introduces the role vocabulary: `Role`
-  (`worker | critic`), `WorkflowName` (`single | review`), and a hard-coded
-  `WORKFLOWS` table. `lead` is deliberately absent — no producer emits it.
-  Core owns the vocabulary; `src/cli/run-command.ts` keeps owning the phase
-  sequence and now derives `review` from `workflowIncludes(workflow, "critic")`.
+  (`driver | worker | critic`), `WorkflowName` (`single | review`), and a
+  hard-coded `WORKFLOWS` table. `driver` is the canonical future coordinator
+  name, but no workflow emits it yet. Core owns the vocabulary;
+  `src/cli/run-command.ts` keeps owning the phase sequence and now derives
+  `review` from `workflowIncludes(workflow, "critic")`.
 - **`Run.workflow?: WorkflowName`** persisted, optional for older runs.
 - **Correction is not a workflow and not a role** — it is the worker responding
   to deterministic feedback, so it belongs to every workflow and `--no-correct`
@@ -271,10 +274,36 @@ in the architecture:
   file-sourced brief is announced as `## Brief (<path>)` instead of being nested
   under `## Objective`, so the brief's own headings don't collide.
 
-Deliberately NOT built (specified in the design doc instead): `RoleAssignment`
-(role → runtime → model), `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/
-`SupervisorDecision`, a `WorkflowExecutor` extraction, a workflow DSL, and the
-Supervisor itself.
+Deliberately NOT built (specified in the design doc instead): runtime registry,
+second adapter selection, `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/
+`DriverDecision`, a `WorkflowExecutor` extraction, a workflow DSL, and the
+Driver itself.
+
+## V1 Lot 1 — execution model harness
+
+This pass keeps the existing single-runtime workflow but records agent work as
+explicit invocations:
+
+- **`Invocation` is the unit of agent execution.** New runs carry
+  `run.invocations[]` for the worker attempt, optional correction worker
+  attempt, and optional read-only critic. The older `run.runtime` and
+  `run.attempts[]` remain for compatibility/status surfaces; attempts link back
+  with `attempt.invocationId`.
+- **Role / Runtime / Model / Effort are separated.** `Invocation.role` is
+  `driver | worker | critic`; `Invocation.target` is an opaque
+  `ExecutionTarget { runtime, model? }`; `Invocation.reasoningEffort` is the
+  portable Conjunction intent (`minimal | low | medium | high | maximum`).
+  Current CLI runs record `medium`; no adapter flag is emitted for effort until
+  a runtime can truthfully support it.
+- **Prompt ownership moved out of adapters.** Core builds worker instructions in
+  `buildWorkerInstructions`; correction and critic packets were already core
+  builders. `AgentRunInput` now receives `instructions` only. The Codex adapter
+  only transmits them via `codex exec`.
+- **Quality harness:** Vitest architecture tests now enforce core → no concrete
+  adapters/CLI and workspace/verification → no core. A reusable adapter contract
+  suite covers structured process outcome, cancellation, timeout, streaming,
+  read-only mode, instruction transmission, no pass/fail decision, and no
+  Git/worktree lifecycle knowledge; Codex passes it through a fake spawner.
 
 `examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
 identical input. Conjunction does not build that application.

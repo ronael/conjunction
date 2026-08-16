@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { AgentAdapter, AgentRunInput, AgentRunResult, Task } from "../../src/core/index.js";
+import type { AgentAdapter, AgentRunInput, AgentRunResult } from "../../src/core/index.js";
 import { cli } from "../../src/cli/cli.js";
 import { inlineBrief } from "../../src/cli/brief.js";
 import { runTask } from "../../src/cli/run-command.js";
@@ -206,11 +206,11 @@ describe("cli run (stub adapter, real git repo)", () => {
   it("lot 6: failed verify triggers one correction attempt, then completes", async () => {
     const repo = await makeTempRepo();
     const io = capture();
-    const packets: (string | undefined)[] = [];
+    const instructions: string[] = [];
     // attempt 1 does nothing (verify fails); attempt 2 receives the packet and fixes it
     const fixingStub = stubAdapter(async (input) => {
-      packets.push(input.promptOverride);
-      if (input.promptOverride !== undefined) {
+      instructions.push(input.instructions);
+      if (input.instructions.includes("PREVIOUS attempt in this worktree FAILED verification")) {
         await writeFile(path.join(input.workspacePath, "good.txt"), "fixed\n");
       }
       return {};
@@ -222,12 +222,12 @@ describe("cli run (stub adapter, real git repo)", () => {
     );
 
     expect(code).toBe(0);
-    expect(packets).toHaveLength(2);
-    expect(packets[0]).toBeUndefined();
-    expect(packets[1]).toContain("PREVIOUS attempt in this worktree FAILED verification");
-    expect(packets[1]).toContain("test -f good.txt");
-    expect(packets[1]).toContain("exit 1");
-    expect(packets[1]).toContain("create good.txt"); // original objective carried over
+    expect(instructions).toHaveLength(2);
+    expect(instructions[0]).toContain("create good.txt");
+    expect(instructions[1]).toContain("PREVIOUS attempt in this worktree FAILED verification");
+    expect(instructions[1]).toContain("test -f good.txt");
+    expect(instructions[1]).toContain("exit 1");
+    expect(instructions[1]).toContain("create good.txt"); // original objective carried over
 
     const text = io.text();
     expect(text).toContain("── correction (attempt 2/2) ──");
@@ -241,10 +241,20 @@ describe("cli run (stub adapter, real git repo)", () => {
     const [runId] = await storedRunIds(repo);
     const stored = JSON.parse(
       await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
-    ) as { run: { state: string; attempts: { index: number; correctionPacket?: string }[] } };
+    ) as {
+      run: {
+        state: string;
+        attempts: { index: number; correctionPacket?: string }[];
+        invocations?: { role: string; readOnly?: boolean }[];
+      };
+    };
     expect(stored.run.state).toBe("completed");
     expect(stored.run.attempts.map((a) => a.index)).toEqual([1, 2]);
-    expect(stored.run.attempts[1]?.correctionPacket).toBe(packets[1]);
+    expect(stored.run.attempts[1]?.correctionPacket).toBe(instructions[1]);
+    expect(stored.run.invocations?.map((invocation) => invocation.role)).toEqual([
+      "worker",
+      "worker",
+    ]);
 
     // correction events in the JSONL stream
     const events = await readFile(
@@ -532,10 +542,10 @@ describe("cli run — audit error paths", () => {
     const reviewPrompts: string[] = [];
     const fixingStub = stubAdapter(async (input) => {
       if (input.readOnly === true) {
-        reviewPrompts.push(input.promptOverride ?? "");
+        reviewPrompts.push(input.instructions);
         return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
       }
-      if (input.promptOverride !== undefined) {
+      if (input.instructions.includes("PREVIOUS attempt in this worktree FAILED verification")) {
         // correction attempt: fix the failure AND add a second file
         await writeFile(path.join(input.workspacePath, "good.txt"), "fixed\n");
         await writeFile(path.join(input.workspacePath, "extra.txt"), "post-correction\n");
@@ -563,9 +573,22 @@ describe("cli run — audit error paths", () => {
     const [runId] = await storedRunIds(repo);
     const stored = JSON.parse(
       await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
-    ) as { run: { state: string; attempts: unknown[]; review?: { structured: boolean } } };
+    ) as {
+      run: {
+        state: string;
+        attempts: unknown[];
+        invocations?: { role: string; readOnly?: boolean }[];
+        review?: { structured: boolean };
+      };
+    };
     expect(stored.run.state).toBe("completed");
     expect(stored.run.attempts).toHaveLength(2);
+    expect(stored.run.invocations?.map((invocation) => invocation.role)).toEqual([
+      "worker",
+      "worker",
+      "critic",
+    ]);
+    expect(stored.run.invocations?.[2]?.readOnly).toBe(true);
     expect(stored.run.review?.structured).toBe(true);
 
     const events = await readFile(
@@ -839,12 +862,10 @@ describe("cli run — briefs", () => {
     const repo = await makeTempRepo();
     const briefPath = path.join(repo, "brief.md");
     await writeFile(briefPath, BRIEF, "utf8");
-    // the prompt is built by the adapter, so build it the same way the real one does
-    const { buildPrompt } = await import("../../src/adapters/codex/prompt.js");
     const io = capture();
-    let seenTask: Task | undefined;
+    let seenInstructions = "";
     const taskCapturingStub = stubAdapter(async (input) => {
-      seenTask = input.task;
+      seenInstructions = input.instructions;
       await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
       return {};
     });
@@ -854,12 +875,10 @@ describe("cli run — briefs", () => {
       out: io.out,
     });
 
-    expect(seenTask).toBeDefined();
-    const prompt = buildPrompt(seenTask as Task);
-    expect(prompt).toContain(`## Brief (${briefPath})`);
-    expect(prompt).toContain("Teach chess to children aged 7–11.");
-    expect(prompt).toContain("- rules engine outside React components");
-    expect(prompt).not.toContain("## Objective\n# ChessQuest"); // not double-nested
+    expect(seenInstructions).toContain(`## Brief (${briefPath})`);
+    expect(seenInstructions).toContain("Teach chess to children aged 7–11.");
+    expect(seenInstructions).toContain("- rules engine outside React components");
+    expect(seenInstructions).not.toContain("## Objective\n# ChessQuest"); // not double-nested
   });
 
   it("the critic packet also carries the brief", async () => {
@@ -869,7 +888,7 @@ describe("cli run — briefs", () => {
     const prompts: string[] = [];
     const reviewingStub = stubAdapter(async (input) => {
       if (input.readOnly === true) {
-        prompts.push(input.promptOverride ?? "");
+        prompts.push(input.instructions);
         return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
       }
       await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");

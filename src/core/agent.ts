@@ -1,5 +1,3 @@
-import type { Task } from "./task.js";
-
 export interface AgentAvailability {
   available: boolean;
   /** Runtime version string when detectable, e.g. "codex-cli 0.144.1". */
@@ -9,7 +7,8 @@ export interface AgentAvailability {
 }
 
 export interface AgentRunInput {
-  task: Task;
+  /** Semantic instructions prepared by Conjunction before the adapter boundary. */
+  instructions: string;
   /** The run's isolated worktree; the only filesystem the agent may touch. */
   workspacePath: string;
   timeoutMs: number;
@@ -17,11 +16,6 @@ export interface AgentRunInput {
   signal?: AbortSignal;
   /** Streaming output; the orchestrator turns chunks into agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
-  /**
-   * When set, this packet REPLACES the task-derived prompt (correction packets
-   * and reviewer packets already carry the task framing and workspace rules).
-   */
-  promptOverride?: string;
   /**
    * Lot 7 reviewer mode: the runtime MUST run read-only (codex maps this to
    * `-s read-only`). There is no way to request a less restrictive sandbox.
@@ -54,6 +48,8 @@ export interface AgentRunResult {
  * - the adapter reports PROCESS OUTCOME ONLY — it never decides pass/fail
  *   (verification, lot 3, is the only gate) and never reviews its own diff;
  * - the adapter knows nothing about branches, worktree lifecycle, or events;
+ * - the adapter receives already-prepared instructions and must not know how a
+ *   Task becomes product-facing prompt text;
  * - core defines this interface; concrete adapters live outside core
  *   (src/adapters/<runtime>/) and are wired in by the CLI.
  */

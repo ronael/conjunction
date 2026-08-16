@@ -3,7 +3,7 @@
 Design record for the `feat/brief-workflows` branch: moving task input from a
 CLI string to a **brief** (file or inline), naming the existing capability
 combinations as **workflows**, and introducing **roles** as the vocabulary a
-future Supervisor will key off.
+future Driver will key off.
 
 This document is the decision record. It states what was built, what was
 deliberately _not_ built, and which prompt suggestions were rejected.
@@ -41,11 +41,12 @@ findRepoRoot → record baseBranch/baseCommit → orchestrator.startRun (worktre
   → summary + persistence + optional cleanup
 ```
 
-The `AgentAdapter` port (`src/core/agent.ts`) receives `{ task, workspacePath,
-timeoutMs, signal?, onOutput?, promptOverride?, readOnly?, outputSchema? }`.
-The Codex adapter turns `task` into a prompt in `src/adapters/codex/prompt.ts`;
-correction and review supply `promptOverride` instead, built by pure functions
-in core (`buildCorrectionPacket`, `buildReviewerPacket`).
+The `AgentAdapter` port (`src/core/agent.ts`) receives `{ instructions,
+workspacePath, timeoutMs, signal?, onOutput?, readOnly?, outputSchema? }`.
+Conjunction builds semantic instructions before the adapter boundary: worker
+instructions via `buildWorkerInstructions`, correction and review packets via
+pure functions in core (`buildCorrectionPacket`, `buildReviewerPacket`). The
+Codex adapter only transmits the prepared string.
 
 ### Which structures carry objective / constraints / acceptance criteria
 
@@ -78,7 +79,7 @@ and have no producer. This directly shapes decision §4.1 below.
 | `src/core/`               | Task, Run + state machine, EventStore, Orchestrator, correction/review packet builders, ports (`WorkspaceProvider`, `VerificationRunner`, `AgentAdapter`) | import any adapter, do I/O, know about a UI |
 | `src/workspace/`          | git worktrees, diff, land patch                                                                                                                           | import core                                 |
 | `src/verification/`       | running deterministic commands                                                                                                                            | import core                                 |
-| `src/adapters/<runtime>/` | one runtime (process spawn, prompt rendering, flags)                                                                                                      | judge pass/fail, know about branches/events |
+| `src/adapters/<runtime>/` | one runtime (process spawn, instruction transport, flags)                                                                                                 | judge pass/fail, know about branches/events |
 | `src/cli/`                | composition root: arg parsing, wiring, phase sequence (`runTask`), persistence (`RunStore`)                                                               | —                                           |
 | `src/cli/ui/`             | Ink TUI, fed only through `RunObserver`                                                                                                                   | be known by the engine                      |
 
@@ -92,7 +93,7 @@ state change) plus `<runId>.events.jsonl`. No database, no index.
 Target:
 
 ```
-Brief  →  Workflow  →  Roles  →  (future) Supervisor
+Brief  →  Workflow  →  Roles  →  (future) Driver
 ```
 
 | #   | Gap                                                                                                                                                                | Severity                  | Addressed in this branch                              |
@@ -100,13 +101,13 @@ Brief  →  Workflow  →  Roles  →  (future) Supervisor
 | 1   | Task text can only come from argv. No file input, no provenance recorded.                                                                                          | blocking                  | **yes**                                               |
 | 2   | A persisted run cannot say _which brief_ produced it.                                                                                                              | blocking for benchmarking | **yes** (`task.source`)                               |
 | 3   | Which capabilities participate is expressed as flag arithmetic (`--review`, `--no-correct`, "correction is on iff `--verify` given"). No name for a configuration. | high                      | **yes** (`--workflow`)                                |
-| 4   | No vocabulary for _roles_. Reviewer independence is a real architectural property but is encoded as `readOnly: true` + a packet shape, not as a named participant. | medium                    | **partially** (`Role` type, workflow → roles)         |
-| 5   | Role → runtime → model is collapsed: one adapter, one `--model` flag, applied to every invocation.                                                                 | medium                    | **no** — documented (§5)                              |
-| 6   | The phase sequence is hard-coded inside `runTask`, interleaved with plain-text rendering. A Supervisor cannot reuse it.                                            | high                      | **no** — documented (§7), deliberately not refactored |
+| 4   | No vocabulary for _roles_. Reviewer independence is a real architectural property but is encoded as `readOnly: true` + a packet shape, not as a named participant. | medium                    | **yes** (`Role` type, workflow → roles)               |
+| 5   | Role → runtime → model is collapsed: one adapter, one `--model` flag, applied to every invocation.                                                                 | medium                    | **partially** (`Invocation.target`)                   |
+| 6   | The phase sequence is hard-coded inside `runTask`, interleaved with plain-text rendering. A Driver cannot reuse it.                                                | high                      | **no** — documented (§7), deliberately not refactored |
 | 7   | No plan/subtask model; a run is one objective end to end.                                                                                                          | expected                  | **no** — designed only (§8)                           |
 | 8   | Context packets exist for correction and review but not as a named concept.                                                                                        | low                       | documented (§6)                                       |
 
-Gaps 5–7 are the Supervisor's job. Closing them now would mean rewriting the
+Gaps 5–7 are the Driver's job. Closing them now would mean rewriting the
 orchestrator for a consumer that does not exist.
 
 ---
@@ -150,8 +151,8 @@ Why not B (parse `## Constraints`, `## Acceptance Criteria` into `Task` fields):
    _is already_ markdown bullets. Parsing markdown into strings to re-emit them
    as markdown is a lossy round-trip with zero gain.
 4. **The real trigger is different.** Structured fields start paying off when a
-   _program_ consumes them — e.g. a Lead assigning specific acceptance criteria
-   to subtask 3 of 5. That is Supervisor work, and when it lands the structure
+   _program_ consumes them — e.g. a Driver assigning specific acceptance criteria
+   to subtask 3 of 5. That is Driver work, and when it lands the structure
    should be **explicit** (YAML front-matter or a sidecar the author opts into),
    not sniffed from headings.
 
@@ -300,11 +301,11 @@ between four capability combinations, expressed as flag arithmetic:
 
 `--workflow` gives two of those combinations a name. That is a renaming of the
 present, not a bet on the future — the cheapest possible abstraction, and the
-slot the Supervisor plugs into later.
+slot the Driver plugs into later.
 
 ```ts
 // src/core/workflow.ts
-export type Role = "worker" | "critic";
+export type Role = "driver" | "worker" | "critic";
 export type WorkflowName = "single" | "review";
 
 export interface WorkflowDefinition {
@@ -319,9 +320,9 @@ export interface WorkflowDefinition {
 | `single` (default) | `worker`           | worker → verification → (bounded correction) → land                      |
 | `review`           | `worker`, `critic` | worker → verification → (bounded correction) → independent critic → land |
 
-`lead` is deliberately **absent from the `Role` union**. Adding a value no
-producer emits would be the speculative abstraction this branch is supposed to
-avoid; adding it later is a one-word change plus a workflow entry.
+`driver` is present as the canonical future coordinator role (replacing older
+coordinator wording), but deliberately absent from the current workflow
+table. No producer emits a Driver invocation in this lot.
 
 ### 5.2 Where correction lives — an explicit decision
 
@@ -362,7 +363,7 @@ exactly the orchestrator rewrite the branch forbids.
 
 **Challenge answered (#4 — hard-coded workflows?)** Yes, hard-coded, in one
 exhaustively-typed table. A config file or DSL earns its place when a workflow
-needs to carry _per-role runtime/model assignments_ — i.e. with the Lead. Until
+needs to carry _per-role runtime/model assignments_ — i.e. with the Driver. Until
 then a DSL would be a configuration language with nothing to configure.
 
 ### 5.5 Role ≠ Runtime ≠ Model
@@ -372,14 +373,13 @@ The constraint holds structurally today:
 | Concept                                | Where it lives now                                                                                                                                               | Where it will live          |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | **Role** — what the participant is for | `Role` in `src/core/workflow.ts`; enforced by packet shape (`buildReviewerPacket` has no field for the worker transcript) and by `readOnly: true` for the critic | unchanged                   |
-| **Runtime** — how it is executed       | `AgentAdapter` implementations, `Run.runtime`                                                                                                                    | a `RoleAssignment` per role |
-| **Model** — which AI                   | `--model`, passed to the adapter constructor                                                                                                                     | a `RoleAssignment` per role |
+| **Runtime** — how it is executed       | `Invocation.target.runtime`, plus legacy `Run.runtime` for compatibility                                                                                         | runtime registry in the CLI |
+| **Model** — which AI                   | `Invocation.target.model?`, populated from `--model` when present                                                                                                | per-role target resolution  |
 
-`RoleAssignment { role, adapter, model }` is **not implemented**. With exactly
-one adapter and one `--model` flag it would be a mapping with a single possible
-value — a lookup table that can only return one answer. It is specified in §8.2
-and lands with the Supervisor, when a second runtime or a per-role model gives
-it a second possible value.
+`RoleAssignment { role, adapter, model }` is **not implemented**. V1 Lot 1 adds
+only the persisted `ExecutionTarget` on each invocation; with exactly one
+adapter and one `--model` flag, a resolver would still be a lookup table with a
+single possible value. Runtime selection lands with the multi-runtime lot.
 
 Nothing named `CodexWorker` or `ClaudeReviewer` exists or may exist in core.
 Core names roles; adapters name runtimes; the CLI wires the two together.
@@ -395,7 +395,7 @@ happened).
 **Challenge answered (#6 — is `Run` still the right persistence level?)** Yes,
 for this branch. A run is still "one orchestrated execution of one objective";
 briefs and workflows are _inputs_ to that, not new lifecycles. It stops being
-the right level when a Lead produces a plan whose subtasks each need their own
+the right level when a Driver produces a plan whose subtasks each need their own
 worktree, verification and audit — then a run owns a plan and subtask results
 become its children (§8.1), which is still one file per run, still no database.
 
@@ -420,8 +420,8 @@ branch preserves it and does not generalize it.
 **Deliberately not built: a `ContextPacket` abstraction.** With two packet
 builders, both pure, both fully tested, a common interface would be an
 indirection over two functions that share no logic beyond "join lines". The
-trigger to introduce it: when a third and fourth packet appear (lead planning
-packet, lead audit packet) and duplication becomes measurable. At that point the
+trigger to introduce it: when a third and fourth packet appear (driver planning
+packet, driver audit packet) and duplication becomes measurable. At that point the
 shape is likely:
 
 ```ts
@@ -446,12 +446,12 @@ no self-validation by the worker.
 it worse than it looks: `Orchestrator` is fine (it drives one run's state
 machine), but `runTask` in `src/cli/run-command.ts` is 330 lines that mix three
 responsibilities — phase sequencing, plain-text rendering, and persistence
-flushing. A Supervisor bolted onto that would inherit all three.
+flushing. A Driver bolted onto that would inherit all three.
 
 Planned separation, **not done in this branch**:
 
 ```
-Supervisor            plans, audits, decides go/stop        (does not exist yet)
+Driver                plans, audits, decides go/stop        (does not exist yet)
     ↓ drives
 WorkflowExecutor      the phase sequence, UI-free           (today: inline in runTask)
     ↓ drives
@@ -461,23 +461,23 @@ Workspace / Verification / AgentAdapter                     (exist, unchanged)
 ```
 
 The trigger for extracting `WorkflowExecutor` is the first workflow whose phase
-sequence is not a subset of today's — i.e. `quality`, which inserts Lead phases
+sequence is not a subset of today's — i.e. `quality`, which inserts Driver phases
 before and after. Extracting it earlier would produce an executor with exactly
-one shape, validated by nothing. Yes, `ExecutionOrchestrator` and `Supervisor`
+one shape, validated by nothing. Yes, `ExecutionOrchestrator` and `Driver`
 should ultimately be separate objects: one owns _a_ run, the other owns _a
 sequence of runs and the decision to continue_.
 
 ---
 
-## 8. Supervisor v0 — proposed, not implemented
+## 8. Driver v0 — proposed, not implemented
 
 Sequential only. One worker active at a time. No parallelism, no dependency
 graph, no distributed state.
 
 ```
-Brief → Lead → structured Plan
-             → subtask 1 → worker → verification → Lead audit → decision
-             → subtask 2 → worker → verification → Lead audit → decision
+Brief → Driver → structured Plan
+               → subtask 1 → worker → verification → Driver audit → decision
+               → subtask 2 → worker → verification → Driver audit → decision
              → final audit → land
 ```
 
@@ -488,7 +488,7 @@ interface Plan {
   readonly id: string;
   readonly runId: string;
   createdAt: string;
-  /** The Lead's restatement of the objective — never replaces the brief. */
+  /** The Driver's restatement of the objective — never replaces the brief. */
   summary: string;
   subtasks: Subtask[];
 }
@@ -498,7 +498,7 @@ interface Subtask {
   index: number; // execution order; sequential, no dependencies
   title: string;
   objective: string; // scope only — the brief stays the source of truth
-  acceptanceCriteria: string[]; // what the Lead will audit against
+  acceptanceCriteria: string[]; // what the Driver will audit against
   verifyCommands?: string[]; // deterministic gate for THIS subtask, if any
 }
 
@@ -511,11 +511,11 @@ interface SubtaskResult {
   completedAt: string;
 }
 
-type SupervisorVerdict = "accept" | "retry" | "stop";
+type DriverVerdict = "accept" | "retry" | "stop";
 
-interface SupervisorDecision {
+interface DriverDecision {
   readonly subtaskId: string;
-  verdict: SupervisorVerdict;
+  verdict: DriverVerdict;
   reason: string; // always required — decisions are inspectable
   /** Bounded guidance for the single retry; never the worker's transcript. */
   guidance?: string;
@@ -526,7 +526,7 @@ interface SupervisorDecision {
 Rules that must hold on day one:
 
 - deterministic verification remains the arbiter for anything it can decide —
-  the Lead may reject a green subtask, but may **not** accept a red one;
+  the Driver may reject a green subtask, but may **not** accept a red one;
 - `retry` is capped per subtask (same discipline as `MAX_CORRECTIONS_PER_RUN`);
 - `stop` is terminal and must carry a reason; the run ends `failed`, not
   silently `completed`;
@@ -534,54 +534,55 @@ Rules that must hold on day one:
 - the plan is produced once, up front. Re-planning mid-run is v1 at the earliest.
 
 None of this is implemented. `Plan`, `Subtask`, `SubtaskResult` and
-`SupervisorDecision` are absent from `src/` on purpose: no workflow in this
-branch produces or consumes them.
+`DriverDecision` are absent from `src/` on purpose: no workflow in this branch
+produces or consumes them.
 
 ### 8.2 `RoleAssignment`, when it lands
 
 ```ts
 interface RoleAssignment {
-  role: Role; // lead | worker | critic
+  role: Role; // driver | worker | critic
   adapter: AgentAdapter; // runtime
   model?: string; // model + runtime-specific options
 }
 ```
 
 Resolution order: workflow default → config file → CLI override. It arrives
-with the Lead, because that is the first moment two roles need _different_
+with the Driver, because that is the first moment two roles need _different_
 runtimes or models.
 
 ---
 
 ## 9. Rejected ideas (summary)
 
-| Idea                                                                               | Verdict            | Why                                                                                 |
-| ---------------------------------------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------- |
-| Markdown heading parser for `## Constraints` etc.                                  | rejected           | convention, not contract; duplicates or loses text; no consumer (§4.1)              |
-| `Brief` as a core entity                                                           | rejected           | no identity, no lifecycle, no state — it is `Task`'s input (§4.2)                   |
-| Storing a second copy of the brief file next to the run                            | rejected           | can disagree with `task.objective`, which is what actually reached the prompts      |
-| `stat()`ing every positional to detect briefs                                      | rejected           | turns the description `"README.md"` into a brief by accident (§4.6)                 |
-| Falling back to "treat it as a description" when a path-like positional is missing | rejected           | a typo would burn a real agent call on a garbage objective                          |
-| Fetching briefs over http(s)                                                       | rejected           | mutable remote breaks run reproducibility; no network in the engine                 |
-| `--workflow quality` registered now                                                | rejected           | names a pipeline that cannot run; unknown-workflow error is more honest             |
-| `lead` in the `Role` union                                                         | rejected (for now) | no producer; one-word change when the Lead lands (§5.1)                             |
-| `RoleAssignment` implemented now                                                   | rejected           | one adapter + one model = a mapping with one possible value (§5.5)                  |
-| YAML/DSL workflow definitions                                                      | rejected           | a configuration language with nothing yet to configure (§5.4)                       |
-| `ContextPacket` common abstraction                                                 | rejected           | indirection over two pure functions that share no logic (§6)                        |
-| Extracting `WorkflowExecutor` now                                                  | rejected           | would have exactly one shape, validated by nothing (§7)                             |
-| `single` meaning "no correction"                                                   | rejected           | silently changes today's default; conflates participants with attempt bounds (§5.2) |
-| Precedence rule for `--workflow single --review`                                   | rejected           | ambiguity should be an error, not a silent winner (§5.3)                            |
+| Idea                                                                               | Verdict  | Why                                                                                 |
+| ---------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------- |
+| Markdown heading parser for `## Constraints` etc.                                  | rejected | convention, not contract; duplicates or loses text; no consumer (§4.1)              |
+| `Brief` as a core entity                                                           | rejected | no identity, no lifecycle, no state — it is `Task`'s input (§4.2)                   |
+| Storing a second copy of the brief file next to the run                            | rejected | can disagree with `task.objective`, which is what actually reached the prompts      |
+| `stat()`ing every positional to detect briefs                                      | rejected | turns the description `"README.md"` into a brief by accident (§4.6)                 |
+| Falling back to "treat it as a description" when a path-like positional is missing | rejected | a typo would burn a real agent call on a garbage objective                          |
+| Fetching briefs over http(s)                                                       | rejected | mutable remote breaks run reproducibility; no network in the engine                 |
+| `--workflow quality` registered now                                                | rejected | names a pipeline that cannot run; unknown-workflow error is more honest             |
+| Driver workflow implemented now                                                    | rejected | no Driver LLM in Lot 1; only the vocabulary and invocation record are needed        |
+| Runtime resolver implemented now                                                   | rejected | one adapter + one model = a mapping with one possible value (§5.5)                  |
+| YAML/DSL workflow definitions                                                      | rejected | a configuration language with nothing yet to configure (§5.4)                       |
+| `ContextPacket` common abstraction                                                 | rejected | indirection over two pure functions that share no logic (§6)                        |
+| Extracting `WorkflowExecutor` now                                                  | rejected | would have exactly one shape, validated by nothing (§7)                             |
+| `single` meaning "no correction"                                                   | rejected | silently changes today's default; conflates participants with attempt bounds (§5.2) |
+| Precedence rule for `--workflow single --review`                                   | rejected | ambiguity should be an error, not a silent winner (§5.3)                            |
 
 **Challenge #9 — which proposed abstractions would be premature?**
-`RoleAssignment`, `ContextPacket`, `Plan`/`Subtask`/`SupervisorDecision`, a
+runtime resolver, `ContextPacket`, `Plan`/`Subtask`/`DriverDecision`, a
 workflow DSL, and `WorkflowExecutor`. All five are specified above and none are
 in `src/`.
 
 **Challenge #10 — the smallest design that evolves without a rewrite.** Exactly
 what this branch ships: one optional provenance field on `Task`, one optional
-workflow field on `Run`, a two-entry workflow table with a role list, and a
-brief loader in the composition root. Every future step — Lead role, per-role
-assignments, plans — is an _addition_ to those, not a change of them.
+workflow field on `Run`, explicit invocations carrying role/target/effort, a
+two-entry workflow table with a role list, and a brief loader in the composition
+root. Every future step — Driver behavior, per-role runtime resolution, plans —
+is an _addition_ to those, not a change of them.
 
 ---
 
@@ -589,11 +590,15 @@ assignments, plans — is an _addition_ to those, not a change of them.
 
 - `src/core/workflow.ts` — `Role`, `WorkflowName`, `WORKFLOWS`,
   `isWorkflowName`, `getWorkflow`, `workflowIncludes`.
+- `src/core/invocation.ts` — `Invocation`, `ExecutionTarget`,
+  `ReasoningEffort`.
+- `src/core/instructions.ts` — worker instruction rendering owned by core.
 - `src/core/task.ts` — `TaskSource`, `Task.source?`, `TaskInput.source?`, and
   `objectiveSection()` (the one place the brief is rendered into a packet
   heading, shared by the three prompt builders).
-- `src/core/run.ts` — `Run.workflow?: WorkflowName`.
-- `src/core/orchestrator.ts` — `createRun(taskId, runtime, workflow?)`.
+- `src/core/run.ts` — `Run.workflow?: WorkflowName`, `Run.target?`,
+  `Run.invocations?`.
+- `src/core/orchestrator.ts` — `createRun(taskId, target, workflow?)`.
 - `src/cli/brief.ts` — `Brief`, `BriefError`, `loadBrief`, `resolveBrief`,
   `looksLikeBriefPath`, `deriveTitle`, `inlineBrief`.
 - `src/cli/cli.ts` — `--brief`, `--workflow`, the positional heuristic,
@@ -605,7 +610,7 @@ assignments, plans — is an _addition_ to those, not a change of them.
   application is not generated).
 
 Non-goals for the branch, all respected: no parallel workers, no swarm, no
-planner, no Supervisor, no queue, no scheduler, no SQLite, no server, no web
+planner, no Driver, no queue, no scheduler, no SQLite, no server, no web
 API, no remote execution, no provider marketplace, no model routing, no graph
 engine, no DSL, no plugin system, no new agent framework, no TUI rewrite, no
 repo-wide refactor.

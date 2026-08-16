@@ -8,6 +8,7 @@ import {
   DEFAULT_WORKFLOW,
   getWorkflow,
   isWorkflowName,
+  type Role,
   WORKFLOW_NAMES,
   WORKFLOWS,
   workflowIncludes,
@@ -33,6 +34,14 @@ describe("workflows", () => {
   it("review adds the independent critic on top of the worker", () => {
     expect(workflowIncludes("review", "worker")).toBe(true);
     expect(workflowIncludes("review", "critic")).toBe(true);
+  });
+
+  it("canonically names the future lead/supervisor role as driver without scheduling it yet", () => {
+    const driver: Role = "driver";
+    expect(driver).toBe("driver");
+    for (const name of WORKFLOW_NAMES) {
+      expect(workflowIncludes(name, "driver")).toBe(false);
+    }
   });
 
   it("every workflow includes a worker — nothing runs without one", () => {

@@ -8,7 +8,6 @@
  * in the composition layer (see docs/brief-workflow-design.md §5.4).
  *
  * Deliberately absent:
- * - a "lead" role: no producer emits it yet (adding it later is one word);
  * - RoleAssignment (role → runtime → model): with one adapter it would be a
  *   mapping with a single possible value;
  * - any DSL / config format: there is nothing yet to configure.
@@ -18,7 +17,7 @@
  * What a participant is FOR — never how it is executed (runtime) or which AI
  * backs it (model). No adapter or provider name may ever appear here.
  */
-export type Role = "worker" | "critic";
+export type Role = "driver" | "worker" | "critic";
 
 export type WorkflowName = "single" | "review";
 

@@ -6,12 +6,14 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import type { Task } from "../../../src/core/index.js";
+import { buildWorkerInstructions } from "../../../src/core/index.js";
 import {
-  buildPrompt,
   CodexAdapter,
   type ProcessSpawner,
   type SpawnedProcess,
 } from "../../../src/adapters/codex/index.js";
+
+import { describeAgentAdapterContract } from "../agent-adapter-contract.js";
 
 class FakeProcess extends EventEmitter implements SpawnedProcess {
   readonly pid = 4242;
@@ -73,15 +75,31 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
+describeAgentAdapterContract("CodexAdapter", {
+  makeSubject: (options = {}) => {
+    const fake = fakeSpawn((child, args) => options.behavior?.(child, args));
+    return {
+      adapter: new CodexAdapter({
+        spawner: fake.spawner,
+        ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
+      }),
+      calls: fake.calls,
+      lastProcess: fake.last,
+    };
+  },
+  promptFromCall: (call) => call.args[call.args.indexOf("--") + 1],
+  sandboxFromCall: (call) => call.args[call.args.indexOf("-s") + 1],
+});
+
 const baseInput = {
-  task: makeTask(),
+  instructions: buildWorkerInstructions(makeTask()),
   workspacePath: "/tmp/worktree",
   timeoutMs: 1_000,
 };
 
-describe("buildPrompt", () => {
+describe("buildWorkerInstructions", () => {
   it("includes objective, constraints, acceptance criteria and workspace rules", () => {
-    const prompt = buildPrompt(makeTask());
+    const prompt = buildWorkerInstructions(makeTask());
     expect(prompt).toContain("Create hello.txt containing hello conjunction");
     expect(prompt).toContain("- no new dependencies");
     expect(prompt).toContain("- hello.txt exists");
@@ -90,12 +108,12 @@ describe("buildPrompt", () => {
   });
 
   it("handles empty constraint/criteria lists and optional fields deterministically", () => {
-    const prompt = buildPrompt(makeTask({ constraints: [], acceptanceCriteria: [] }));
+    const prompt = buildWorkerInstructions(makeTask({ constraints: [], acceptanceCriteria: [] }));
     expect(prompt).toContain("- None specified.");
     expect(prompt).toContain("- The objective above is fulfilled.");
     expect(prompt).not.toContain("Relevant paths");
 
-    const withOptionals = buildPrompt(
+    const withOptionals = buildWorkerInstructions(
       makeTask({ relevantPaths: ["src/"], verificationExpectations: ["pnpm test passes"] }),
     );
     expect(withOptionals).toContain("- src/");
@@ -227,10 +245,10 @@ describe("CodexAdapter reviewer modes (lot 7)", () => {
     expect(args.join(" ")).not.toContain("danger-full-access");
   });
 
-  it("promptOverride replaces the task-derived prompt", async () => {
+  it("uses the caller-prepared instructions verbatim", async () => {
     const fake = fakeSpawn((child) => child.exit(0));
     const adapter = new CodexAdapter({ spawner: fake.spawner });
-    await adapter.run({ ...baseInput, promptOverride: "THE PACKET" });
+    await adapter.run({ ...baseInput, instructions: "THE PACKET" });
     const args = fake.calls[0]?.args ?? [];
     const prompt = args[args.indexOf("--") + 1];
     expect(prompt).toBe("THE PACKET");

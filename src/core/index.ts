@@ -9,6 +9,14 @@ export {
   type TaskStatus,
 } from "./task.js";
 export {
+  type ExecutionTarget,
+  type Invocation,
+  type InvocationState,
+  type InvocationTerminationReason,
+  type ReasoningEffort,
+} from "./invocation.js";
+export { buildWorkerInstructions } from "./instructions.js";
+export {
   DEFAULT_WORKFLOW,
   getWorkflow,
   isWorkflowName,

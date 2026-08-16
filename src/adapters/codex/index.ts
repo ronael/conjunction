@@ -1,5 +1,4 @@
 export { CodexAdapter, type CodexAdapterOptions } from "./adapter.js";
-export { buildPrompt } from "./prompt.js";
 export {
   defaultSpawner,
   type ProcessSpawner,
