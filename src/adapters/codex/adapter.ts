@@ -69,8 +69,8 @@ export class CodexAdapter implements AgentAdapter {
 
   capabilities(): AgentCapabilities {
     return {
-      readOnly: true,
-      structuredOutput: true,
+      supportsReadOnly: true,
+      supportsStructuredOutput: true,
       // `codex exec --help` for 0.144.1 exposes no portable reasoning-effort flag.
       reasoningEffort: [],
     };

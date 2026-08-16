@@ -27,8 +27,8 @@ function stubAgent(
   run: (input: AgentRunInput) => void,
   result: Partial<AgentRunResult>,
   capabilities: AgentCapabilities = {
-    readOnly: true,
-    structuredOutput: true,
+    supportsReadOnly: true,
+    supportsStructuredOutput: true,
     reasoningEffort: [],
   },
 ): {
@@ -313,7 +313,7 @@ describe("Orchestrator.invokeAgent role read-only invariants", () => {
     const { adapter, inputs } = stubAgent(
       () => {},
       {},
-      { readOnly: false, structuredOutput: true, reasoningEffort: [] },
+      { supportsReadOnly: false, supportsStructuredOutput: true, reasoningEffort: [] },
     );
     const orchestrator = new Orchestrator({
       createId,

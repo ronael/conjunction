@@ -21,10 +21,15 @@ export interface DriverDecisionRecord extends DriverDecision {
   readonly createdAt: string;
 }
 
+export interface WorkerTargetPermissions {
+  readonly workspaceWrite: boolean;
+}
+
 export interface DriverTargetOption {
   readonly id: string;
   readonly target: ExecutionTarget;
-  readonly capabilities: AgentCapabilities;
+  readonly runtimeCapabilities: AgentCapabilities;
+  readonly workerPermissions: WorkerTargetPermissions;
 }
 
 export interface DriverLimits {
@@ -168,7 +173,8 @@ export function buildDriverPacket(input: {
     allowedWorkerTargets: input.allowedWorkerTargets.map((entry) => ({
       id: entry.id,
       target: entry.target,
-      capabilities: entry.capabilities,
+      runtimeCapabilities: entry.runtimeCapabilities,
+      workerPermissions: entry.workerPermissions,
     })),
     invocations: (input.run.invocations ?? []).map(summarizeInvocation),
     decisions: input.run.driverDecisions ?? [],
@@ -204,14 +210,20 @@ export function buildDriverPacket(input: {
     "```",
     "",
     "## Decision rules",
+    "- Runtime capability `supportsReadOnly: true` means the runtime can be restricted",
+    "  to read-only mode. It does NOT mean worker invocations using that runtime",
+    "  are read-only.",
+    "- Worker targets listed in allowedWorkerTargets are writable inside the",
+    "  isolated Conjunction worktree when workerPermissions.workspaceWrite is true.",
+    "- Driver and critic invocations are always read-only.",
     "- Return exactly one JSON object matching the provided schema.",
     "- Use action `delegate` to ask one writable worker invocation to do bounded work.",
     "- Use action `verify` to run deterministic checks.",
     "- Use action `accept` only when verification is fresh and green.",
     "- Use action `stop` when the run should fail with your reason.",
     "- Choose targetId only from allowedWorkerTargets.",
-    "- Set reasoningEffort only to a value listed in that target's capabilities.reasoningEffort.",
-    "- If capabilities.reasoningEffort is empty, omit reasoningEffort for that target.",
+    "- Set reasoningEffort only to a value listed in that target's runtimeCapabilities.reasoningEffort.",
+    "- If runtimeCapabilities.reasoningEffort is empty, omit reasoningEffort for that target.",
   ].join("\n");
 }
 

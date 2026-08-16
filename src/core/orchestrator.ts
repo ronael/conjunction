@@ -939,10 +939,10 @@ export class Orchestrator {
         `reasoning effort "${requirements.explicitReasoningEffort}"`,
       );
     }
-    if (requirements.readOnly === true && !capabilities.readOnly) {
+    if (requirements.readOnly === true && !capabilities.supportsReadOnly) {
       throw new UnsupportedRuntimeCapabilityError(target.runtime, "read-only execution");
     }
-    if (requirements.outputSchema !== undefined && !capabilities.structuredOutput) {
+    if (requirements.outputSchema !== undefined && !capabilities.supportsStructuredOutput) {
       throw new UnsupportedRuntimeCapabilityError(target.runtime, "structured output");
     }
     return adapter;

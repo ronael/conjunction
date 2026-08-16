@@ -44,8 +44,8 @@ function stubAdapter(
   return {
     id: options.id ?? "stub-agent",
     capabilities: () => ({
-      readOnly: true,
-      structuredOutput: true,
+      supportsReadOnly: true,
+      supportsStructuredOutput: true,
       reasoningEffort: (options.reasoningEffort ?? [
         "minimal",
         "low",
@@ -1329,7 +1329,11 @@ describe("cli status / doctor / usage", () => {
 
     const down: AgentAdapter = {
       id: "stub-agent",
-      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
+      capabilities: () => ({
+        supportsReadOnly: true,
+        supportsStructuredOutput: true,
+        reasoningEffort: [],
+      }),
       detect: () => Promise.resolve({ available: false, reason: "not installed" }),
       run: () => Promise.reject(new Error("should not run")),
     };

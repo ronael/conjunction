@@ -325,9 +325,12 @@ This pass keeps the same serial workflow, but invocation targets are now real:
   schema, Claude uses `--output-format json` and the adapter extracts
   `structured_output` from Claude's transport envelope before returning
   `AgentRunResult.lastMessage`.
-- **Capabilities:** adapters expose `AgentCapabilities`. Codex supports
-  read-only and structured output but declares no reasoning-effort mapping.
-  Claude supports read-only, structured output, and maps Conjunction
+- **Capabilities:** adapters expose `AgentCapabilities` as support flags:
+  `supportsReadOnly`, `supportsStructuredOutput`, and supported
+  `reasoningEffort` mappings. `supportsReadOnly: true` means the runtime can
+  be restricted to read-only mode; it does not mean every invocation is
+  read-only. Codex supports read-only and structured output but declares no
+  reasoning-effort mapping. Claude supports read-only, structured output, and maps Conjunction
   `low|medium|high|maximum` to Claude `low|medium|high|max`; `minimal` is not
   mapped.
 - **Claude Code headless limit:** the current non-interactive Claude mode can
@@ -351,8 +354,11 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
   escalation are represented as a new `delegate` decision with target/objective
   and optional `reasoningEffort`; no extra routing primitive exists.
 - **Target pool:** `quality` receives an explicit list of allowed worker targets
-  (`id -> ExecutionTarget + capabilities`). The Driver can choose only by
-  target id; unknown ids fail the run before a worker invocation is created.
+  (`id -> ExecutionTarget + runtimeCapabilities`). The Driver can choose only
+  by target id; unknown ids fail the run before a worker invocation is created.
+  Driver packets also expose `workerPermissions.workspaceWrite: true` for
+  worker targets, separating "runtime can be made read-only" from "this worker
+  invocation may write inside the isolated worktree".
 - **Shared execution plumbing:** `src/cli/run-session.ts` owns the common repo
   root resolution, Orchestrator wiring, worktree setup, verification runner,
   run persistence flushing, cancellation checks, and cleanup. The strategies

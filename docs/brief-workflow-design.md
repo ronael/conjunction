@@ -497,7 +497,10 @@ invocation. Writable worker invocations record a deterministic
 `workspaceChange` diff fingerprint comparison so the next Driver context can
 distinguish "the worktree has changes" from "the last worker changed nothing".
 Repeated verification failure facts are consecutive, not total historical
-counts.
+counts. Worker target facts distinguish `runtimeCapabilities` from
+`workerPermissions`: `supportsReadOnly` is the runtime's ability to enforce
+read-only mode, while `workspaceWrite: true` is the effective worker permission
+inside the isolated Conjunction worktree.
 
 ### 8.1 Earlier sketch retained for context
 

@@ -10,9 +10,9 @@ export interface AgentAvailability {
 
 export interface AgentCapabilities {
   /** Adapter can enforce a read-only invocation mode. */
-  readOnly: boolean;
+  supportsReadOnly: boolean;
   /** Adapter can request structured final output from the runtime. */
-  structuredOutput: boolean;
+  supportsStructuredOutput: boolean;
   /** Conjunction reasoning-effort intentions this runtime can map truthfully. */
   reasoningEffort: readonly ReasoningEffort[];
 }

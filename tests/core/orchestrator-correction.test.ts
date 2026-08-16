@@ -32,7 +32,11 @@ function scriptedAgent(
     inputs,
     adapter: {
       id: "stub-agent",
-      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
+      capabilities: () => ({
+        supportsReadOnly: true,
+        supportsStructuredOutput: true,
+        reasoningEffort: [],
+      }),
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);

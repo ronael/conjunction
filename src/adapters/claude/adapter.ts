@@ -72,8 +72,8 @@ export class ClaudeAdapter implements AgentAdapter {
 
   capabilities(): AgentCapabilities {
     return {
-      readOnly: true,
-      structuredOutput: true,
+      supportsReadOnly: true,
+      supportsStructuredOutput: true,
       // Claude Code 2.1.220 exposes --effort low|medium|high|xhigh|max.
       // Conjunction has no xhigh intent; `maximum` maps to `max`.
       reasoningEffort: ["low", "medium", "high", "maximum"],

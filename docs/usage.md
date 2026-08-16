@@ -205,6 +205,26 @@ Retry, target switch, and effort escalation are all represented as another
 V1 caps are deterministic: max 8 Driver decisions and max 4 writable worker
 invocations. Driver decisions are stored in `run.driverDecisions[]`; verification
 checkpoints are stored in `run.verificationHistory[]`.
+Worker target facts sent to the Driver separate runtime support from effective
+worker permission:
+
+```json
+{
+  "runtimeCapabilities": {
+    "supportsReadOnly": true,
+    "supportsStructuredOutput": true
+  },
+  "workerPermissions": {
+    "workspaceWrite": true
+  }
+}
+```
+
+`supportsReadOnly: true` means the runtime can be restricted for Driver/Critic
+invocations. It does not mean the worker target is read-only. `workspaceWrite`
+means only that Conjunction permits the worker invocation to modify its isolated
+worktree; it does not grant commit rights, host filesystem access, or a broad
+terminal/tool policy.
 Each writable worker invocation records whether its before/after worktree diff
 fingerprint changed. The next Driver packet exposes this as
 `lastWorkerChangedWorkspace`, alongside consecutive repeated verification

@@ -47,8 +47,8 @@ export function describeAgentAdapterContract(
     it("declares capabilities explicitly", () => {
       const subject = harness.makeSubject({ behavior: (child) => child.exit(0) });
       const capabilities = subject.adapter.capabilities();
-      expect(typeof capabilities.readOnly).toBe("boolean");
-      expect(typeof capabilities.structuredOutput).toBe("boolean");
+      expect(typeof capabilities.supportsReadOnly).toBe("boolean");
+      expect(typeof capabilities.supportsStructuredOutput).toBe("boolean");
       expect(Array.isArray(capabilities.reasoningEffort)).toBe(true);
     });
 

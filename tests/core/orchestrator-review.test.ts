@@ -32,8 +32,8 @@ function scriptedAgent(
     lastMessage?: string;
   }[],
   capabilities: AgentCapabilities = {
-    readOnly: true,
-    structuredOutput: true,
+    supportsReadOnly: true,
+    supportsStructuredOutput: true,
     reasoningEffort: [],
   },
 ): { adapter: AgentAdapter; inputs: AgentRunInput[] } {
@@ -73,8 +73,8 @@ function recordingAgent(
     adapter: {
       id,
       capabilities: () => ({
-        readOnly: true,
-        structuredOutput: true,
+        supportsReadOnly: true,
+        supportsStructuredOutput: true,
         reasoningEffort: ["low", "medium", "high", "maximum"],
       }),
       detect: () => Promise.resolve({ available: true }),
@@ -263,7 +263,7 @@ describe("Orchestrator review (lot 7)", () => {
   it("refuses critic read-only execution when the adapter cannot enforce it", async () => {
     const { adapter, inputs } = scriptedAgent(
       [{ exitCode: 0 }, { exitCode: 0, lastMessage: FINDINGS_JSON }],
-      { readOnly: false, structuredOutput: true, reasoningEffort: [] },
+      { supportsReadOnly: false, supportsStructuredOutput: true, reasoningEffort: [] },
     );
     const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
     const { run } = await runningRun(orchestrator);
@@ -284,7 +284,7 @@ describe("Orchestrator review (lot 7)", () => {
   it("refuses critic structured output when the adapter cannot produce it", async () => {
     const { adapter, inputs } = scriptedAgent(
       [{ exitCode: 0 }, { exitCode: 0, lastMessage: FINDINGS_JSON }],
-      { readOnly: true, structuredOutput: false, reasoningEffort: [] },
+      { supportsReadOnly: true, supportsStructuredOutput: false, reasoningEffort: [] },
     );
     const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
     const { run } = await runningRun(orchestrator);

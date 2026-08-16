@@ -41,8 +41,8 @@ afterEach(async () => {
 
 function capabilities(overrides: Partial<AgentCapabilities> = {}): AgentCapabilities {
   return {
-    readOnly: true,
-    structuredOutput: true,
+    supportsReadOnly: true,
+    supportsStructuredOutput: true,
     reasoningEffort: ["minimal", "low", "medium", "high", "maximum"],
     ...overrides,
   };
@@ -216,12 +216,146 @@ describe("quality workflow", () => {
     ).toBe(true);
     expect(scenario.driverInputs[0]?.instructions).toContain("allowedWorkerTargets");
     expect(scenario.driverInputs[0]?.instructions).toContain("omit reasoningEffort");
+    expect(scenario.driverInputs[0]?.instructions).toContain(
+      "It does NOT mean worker invocations using that runtime",
+    );
+    const initialFacts = driverFacts(scenario.driverInputs[0]?.instructions ?? "");
+    expect(initialFacts.allowedWorkerTargets[0]).toMatchObject({
+      id: "worker",
+      runtimeCapabilities: {
+        supportsReadOnly: true,
+        supportsStructuredOutput: true,
+      },
+      workerPermissions: {
+        workspaceWrite: true,
+      },
+    });
+    expect(JSON.stringify(initialFacts.allowedWorkerTargets[0])).not.toContain('"readOnly"');
+    expect(JSON.stringify(initialFacts.allowedWorkerTargets[0])).not.toContain('"capabilities"');
     expect(scenario.criticInputs[0]?.target).toEqual({ runtime: "critic" });
     expect(scenario.criticInputs[0]?.readOnly).toBe(true);
     expect(scenario.criticInputs[0]?.outputSchema).toBe(REVIEW_OUTPUT_SCHEMA);
     expect(scenario.run.review?.structured).toBe(true);
     expect(scenario.run.result?.summary).toContain("driver accepted");
     expect(scenario.run.verificationHistory).toHaveLength(2);
+  });
+
+  it("does not confuse worker runtime supportsReadOnly with an effective read-only worker permission", async () => {
+    const scenario = await runQuality({
+      decisions: [
+        {
+          action: "delegate",
+          targetId: "worker",
+          objective: "create done.txt",
+          reason: "worker is writable even though runtime supports read-only mode",
+        },
+        { action: "verify", reason: "check write" },
+        { action: "accept", reason: "fresh green verification" },
+      ],
+      workers: {
+        shared: async (input) => {
+          expect(input.readOnly).not.toBe(true);
+          await writeFile(path.join(input.workspacePath, "done.txt"), "ok\n");
+        },
+      },
+      workerTargets: [{ id: "worker", target: { runtime: "shared" } }],
+      workerCapabilities: { shared: capabilities({ supportsReadOnly: true }) },
+    });
+
+    expect(scenario.run.state).toBe("completed");
+    expect(scenario.workerInputs.shared?.[0]?.readOnly).toBeUndefined();
+    const workerInvocation = scenario.run.invocations?.find(
+      (invocation) => invocation.role === "worker",
+    );
+    expect(workerInvocation?.readOnly).toBeUndefined();
+    expect(workerInvocation?.workspaceChange?.changed).toBe(true);
+    const facts = driverFacts(scenario.driverInputs[0]?.instructions ?? "");
+    expect(facts.allowedWorkerTargets[0]).toMatchObject({
+      runtimeCapabilities: { supportsReadOnly: true },
+      workerPermissions: { workspaceWrite: true },
+    });
+  });
+
+  it("allows a runtime without supportsReadOnly as worker but refuses it as Driver or critic", async () => {
+    const workerOnly = await runQuality({
+      decisions: [
+        { action: "delegate", targetId: "worker", objective: "create done.txt", reason: "write" },
+        { action: "verify", reason: "check write" },
+        { action: "accept", reason: "done" },
+      ],
+      workers: {
+        writable: async (input) => {
+          await writeFile(path.join(input.workspacePath, "done.txt"), "ok\n");
+        },
+      },
+      workerTargets: [{ id: "worker", target: { runtime: "writable" } }],
+      workerCapabilities: { writable: capabilities({ supportsReadOnly: false }) },
+    });
+    expect(workerOnly.run.state).toBe("completed");
+    expect(workerOnly.workerInputs.writable?.[0]?.readOnly).toBeUndefined();
+
+    const repoForDriver = await makeTempRepo();
+    let driverOutput = "";
+    const driverRefusal = await runTask(
+      {
+        brief: inlineBrief("quality task"),
+        workflow: "quality",
+        workerTarget: { runtime: "writable" },
+        workerTargets: [{ id: "worker", target: { runtime: "writable" } }],
+        driverTarget: { runtime: "writable" },
+        criticTarget: { runtime: "critic" },
+        repoPath: repoForDriver,
+        verifyCommands: [verifyFile("done.txt")],
+        timeoutMinutes: 1,
+        cleanup: false,
+        correct: false,
+      },
+      {
+        runtimeRegistry: new StaticRuntimeRegistry([
+          adapter("writable", async () => ({}), capabilities({ supportsReadOnly: false })).adapter,
+          criticAdapter().adapter,
+        ]),
+        out: (chunk) => {
+          driverOutput += chunk;
+        },
+      },
+    );
+    expect(driverRefusal.exitCode).toBe(2);
+    expect(driverOutput).toContain(
+      'error: driver runtime "writable" does not support read-only execution',
+    );
+
+    const repoForCritic = await makeTempRepo();
+    let criticOutput = "";
+    const criticRefusal = await runTask(
+      {
+        brief: inlineBrief("quality task"),
+        workflow: "quality",
+        workerTarget: { runtime: "worker" },
+        workerTargets: [{ id: "worker", target: { runtime: "worker" } }],
+        driverTarget: { runtime: "driver" },
+        criticTarget: { runtime: "writable" },
+        repoPath: repoForCritic,
+        verifyCommands: [verifyFile("done.txt")],
+        timeoutMinutes: 1,
+        cleanup: false,
+        correct: false,
+      },
+      {
+        runtimeRegistry: new StaticRuntimeRegistry([
+          driverAdapter([{ action: "stop", reason: "unused" }]).adapter,
+          adapter("worker", async () => ({})).adapter,
+          adapter("writable", async () => ({}), capabilities({ supportsReadOnly: false })).adapter,
+        ]),
+        out: (chunk) => {
+          criticOutput += chunk;
+        },
+      },
+    );
+    expect(criticRefusal.exitCode).toBe(2);
+    expect(criticOutput).toContain(
+      'error: critic runtime "writable" does not support read-only execution',
+    );
   });
 
   it("dynamic switch: Driver can delegate Worker A, then Worker B, before verifying", async () => {
@@ -555,6 +689,17 @@ describe("quality workflow", () => {
 });
 
 function driverFacts(instructions: string): {
+  allowedWorkerTargets: Array<{
+    id: string;
+    runtimeCapabilities: {
+      supportsReadOnly: boolean;
+      supportsStructuredOutput: boolean;
+      reasoningEffort: string[];
+    };
+    workerPermissions: {
+      workspaceWrite: boolean;
+    };
+  }>;
   progress: {
     lastWorkerChangedWorkspace?: boolean;
     repeatedFailureSignatureCount: number;
@@ -564,6 +709,17 @@ function driverFacts(instructions: string): {
   const match = instructions.match(/## Structured facts\n```json\n([\s\S]*?)\n```/);
   expect(match?.[1]).toBeDefined();
   return JSON.parse(match?.[1] ?? "{}") as {
+    allowedWorkerTargets: Array<{
+      id: string;
+      runtimeCapabilities: {
+        supportsReadOnly: boolean;
+        supportsStructuredOutput: boolean;
+        reasoningEffort: string[];
+      };
+      workerPermissions: {
+        workspaceWrite: boolean;
+      };
+    }>;
     progress: {
       lastWorkerChangedWorkspace?: boolean;
       repeatedFailureSignatureCount: number;

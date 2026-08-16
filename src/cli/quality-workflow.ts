@@ -402,7 +402,8 @@ async function preflightQualityTargets(input: PreflightInput): Promise<Preflight
     workerTargets.push({
       id: entry.id,
       target: entry.target,
-      capabilities: adapter.capabilities(),
+      runtimeCapabilities: adapter.capabilities(),
+      workerPermissions: { workspaceWrite: true },
     });
   }
 
@@ -476,10 +477,10 @@ function validateTarget(
     return unknownRuntime(target.runtime, registry);
   }
   const capabilities = adapter.capabilities();
-  if (requirements.readOnly === true && !capabilities.readOnly) {
+  if (requirements.readOnly === true && !capabilities.supportsReadOnly) {
     return `error: ${requirements.label} runtime "${adapter.id}" does not support read-only execution`;
   }
-  if (requirements.structuredOutput === true && !capabilities.structuredOutput) {
+  if (requirements.structuredOutput === true && !capabilities.supportsStructuredOutput) {
     return `error: ${requirements.label} runtime "${adapter.id}" does not support structured output`;
   }
   if (

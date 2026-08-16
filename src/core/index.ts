@@ -67,6 +67,7 @@ export {
   type DriverProgressFacts,
   type DriverRunConfig,
   type DriverTargetOption,
+  type WorkerTargetPermissions,
 } from "./driver.js";
 export {
   buildCorrectionPacket,
