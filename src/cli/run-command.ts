@@ -317,7 +317,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       timeoutMs: options.timeoutMinutes * 60_000,
       target: options.workerTarget,
       ...(options.workerReasoningEffort !== undefined
-        ? { reasoningEffort: options.workerReasoningEffort }
+        ? { explicitReasoningEffort: options.workerReasoningEffort }
         : {}),
       onOutput: (chunk, stream) => {
         observer?.agentOutput?.(chunk, stream);
@@ -416,9 +416,9 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         target: options.criticTarget ?? options.workerTarget,
       };
       if (options.criticReasoningEffort !== undefined) {
-        criticOptions.reasoningEffort = options.criticReasoningEffort;
+        criticOptions.explicitReasoningEffort = options.criticReasoningEffort;
       } else {
-        delete criticOptions.reasoningEffort;
+        delete criticOptions.explicitReasoningEffort;
       }
       await orchestrator.reviewRun(run.id, packet, criticOptions);
       await flush(task, run);

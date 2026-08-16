@@ -102,6 +102,7 @@ export {
   RunNotFoundError,
   RuntimeNotFoundError,
   TaskNotFoundError,
+  UnsupportedRuntimeCapabilityError,
   type ExecuteRunOptions,
   type OrchestratorDeps,
   type VerificationRunner,

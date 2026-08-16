@@ -41,6 +41,9 @@ export interface ClaudeAdapterOptions {
  *
  * Writer invocation: `claude -p --output-format text --no-session-persistence
  * --permission-mode acceptEdits [--model <model>] [--effort <level>] <prompt>`.
+ * With `outputSchema`, Claude requires `--output-format json --json-schema`
+ * and returns the contract payload in the transport envelope's
+ * `structured_output` field.
  *
  * Read-only invocation: switches to `--permission-mode plan` and restricts the
  * available built-in tools to read-only file navigation tools.
@@ -90,19 +93,18 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    const structuredOutput = input.outputSchema !== undefined;
     const args = [
       "-p",
       "--output-format",
-      "text",
+      structuredOutput ? "json" : "text",
       "--no-session-persistence",
       "--permission-mode",
       input.readOnly === true ? "plan" : "acceptEdits",
       ...(input.readOnly === true ? ["--tools", READ_ONLY_TOOLS] : []),
       ...(input.target.model !== undefined ? ["--model", input.target.model] : []),
       ...effortArgs(input.reasoningEffort),
-      ...(input.outputSchema !== undefined
-        ? ["--json-schema", JSON.stringify(input.outputSchema)]
-        : []),
+      ...(structuredOutput ? ["--json-schema", JSON.stringify(input.outputSchema)] : []),
       input.instructions,
     ];
 
@@ -135,7 +137,7 @@ export class ClaudeAdapter implements AgentAdapter {
         }
         input.signal?.removeEventListener("abort", onAbort);
         const result: AgentRunResult = { exitCode, timedOut, aborted };
-        const lastMessage = stdout.trim();
+        const lastMessage = structuredOutput ? structuredOutputLastMessage(stdout) : stdout.trim();
         if (lastMessage.length > 0) {
           result.lastMessage = lastMessage;
         }
@@ -197,4 +199,30 @@ export class ClaudeAdapter implements AgentAdapter {
 function effortArgs(effort: ReasoningEffort): string[] {
   const mapped = CLAUDE_EFFORT[effort];
   return mapped === undefined ? [] : ["--effort", mapped];
+}
+
+function structuredOutputLastMessage(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (trimmed.length === 0) {
+    return "";
+  }
+  try {
+    const envelope: unknown = JSON.parse(trimmed);
+    if (
+      typeof envelope === "object" &&
+      envelope !== null &&
+      Object.prototype.hasOwnProperty.call(envelope, "structured_output")
+    ) {
+      const structured = JSON.stringify(
+        (envelope as { structured_output: unknown }).structured_output,
+      );
+      if (structured !== undefined) {
+        return structured;
+      }
+    }
+  } catch {
+    // Preserve the raw runtime output so the generic caller can fail/fallback
+    // without learning Claude's transport envelope.
+  }
+  return trimmed;
 }

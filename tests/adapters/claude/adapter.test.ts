@@ -127,17 +127,18 @@ describe("ClaudeAdapter.run invocation", () => {
     expect(fake.calls[0]?.args).not.toContain("--effort");
   });
 
-  it("passes structured output schema as a JSON schema string", async () => {
+  it("requests Claude JSON output and passes structured output schema", async () => {
     const schema = { type: "object", properties: { summary: { type: "string" } } };
     const fake = fakeSpawn((child) => child.exit(0));
     const adapter = makeAdapter({ spawner: fake.spawner });
     await adapter.run({ ...baseInput, outputSchema: schema });
     const args = fake.calls[0]?.args ?? [];
+    expect(args[args.indexOf("--output-format") + 1]).toBe("json");
     expect(args).toContain("--json-schema");
     expect(JSON.parse(args[args.indexOf("--json-schema") + 1] ?? "")).toEqual(schema);
   });
 
-  it("uses stdout as the final message", async () => {
+  it("uses text stdout as the final message without a schema", async () => {
     const fake = fakeSpawn((child) => {
       child.stdout.write("review ");
       child.stdout.write("done\n");
@@ -146,6 +147,41 @@ describe("ClaudeAdapter.run invocation", () => {
     const adapter = makeAdapter({ spawner: fake.spawner });
     const result = await adapter.run(baseInput);
     expect(result.lastMessage).toBe("review done");
+  });
+
+  it("extracts structured_output from Claude's JSON envelope", async () => {
+    const schema = { type: "object", properties: { summary: { type: "string" } } };
+    const structured = { summary: "review ok", findings: [] };
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(JSON.stringify({ type: "result", structured_output: structured }));
+      child.exit(0);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.lastMessage).toBe(JSON.stringify(structured));
+  });
+
+  it("preserves malformed JSON output for generic parsing fallback", async () => {
+    const schema = { type: "object" };
+    const fake = fakeSpawn((child) => {
+      child.stdout.write("{not json");
+      child.exit(0);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.lastMessage).toBe("{not json");
+  });
+
+  it("preserves malformed Claude envelopes without structured_output", async () => {
+    const schema = { type: "object" };
+    const envelope = { type: "result", result: "plain response" };
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(JSON.stringify(envelope));
+      child.exit(0);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.lastMessage).toBe(JSON.stringify(envelope));
   });
 });
 

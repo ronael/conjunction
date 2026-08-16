@@ -5,7 +5,9 @@ import {
   Orchestrator,
   RunNotExecutableError,
   StaticRuntimeRegistry,
+  UnsupportedRuntimeCapabilityError,
   type AgentAdapter,
+  type AgentCapabilities,
   type AgentRunInput,
   type AgentRunResult,
   type WorkspaceProvider,
@@ -24,6 +26,11 @@ const stubWorkspace: WorkspaceProvider = {
 function stubAgent(
   run: (input: AgentRunInput) => void,
   result: Partial<AgentRunResult>,
+  capabilities: AgentCapabilities = {
+    readOnly: true,
+    structuredOutput: true,
+    reasoningEffort: [],
+  },
 ): {
   adapter: AgentAdapter;
   inputs: AgentRunInput[];
@@ -33,7 +40,7 @@ function stubAgent(
     inputs,
     adapter: {
       id: "stub-agent",
-      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
+      capabilities: () => capabilities,
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);
@@ -108,6 +115,47 @@ describe("Orchestrator.executeRun", () => {
       ],
     );
     expect(forwarded).toEqual(["working…\n", "warning\n"]);
+  });
+
+  it("refuses explicit unsupported reasoning effort before adapter.run", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, {});
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await expect(
+      orchestrator.executeRun(run.id, {
+        timeoutMs: 1_000,
+        explicitReasoningEffort: "high",
+      }),
+    ).rejects.toThrow(UnsupportedRuntimeCapabilityError);
+
+    expect(inputs).toHaveLength(0);
+    expect(run.invocations).toHaveLength(0);
+    expect(orchestrator.events.ofType("agent.started")).toHaveLength(0);
+    expect(orchestrator.events.ofType("agent.completed")).toHaveLength(0);
+  });
+
+  it("keeps the historical default medium intent without requiring runtime effort support", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, {});
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]?.reasoningEffort).toBe("medium");
+    expect(run.invocations?.[0]?.reasoningEffort).toBe("medium");
+    expect(run.invocations?.[0]?.state).toBe("completed");
   });
 
   it("fails the run on a non-zero agent exit", async () => {

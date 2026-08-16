@@ -5,7 +5,9 @@ import {
   RunNotExecutableError,
   REVIEW_OUTPUT_SCHEMA,
   StaticRuntimeRegistry,
+  UnsupportedRuntimeCapabilityError,
   type AgentAdapter,
+  type AgentCapabilities,
   type AgentRunInput,
   type VerificationOutcome,
   type VerificationRunner,
@@ -29,13 +31,18 @@ function scriptedAgent(
     aborted?: boolean;
     lastMessage?: string;
   }[],
+  capabilities: AgentCapabilities = {
+    readOnly: true,
+    structuredOutput: true,
+    reasoningEffort: [],
+  },
 ): { adapter: AgentAdapter; inputs: AgentRunInput[] } {
   const inputs: AgentRunInput[] = [];
   return {
     inputs,
     adapter: {
       id: "stub-agent",
-      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
+      capabilities: () => capabilities,
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);
@@ -215,13 +222,13 @@ describe("Orchestrator review (lot 7)", () => {
 
     await orchestrator.executeRun(run.id, {
       timeoutMs: 1_000,
-      reasoningEffort: "high",
+      explicitReasoningEffort: "high",
     });
     await orchestrator.verifyRun(run.id, { review: true });
     await orchestrator.reviewRun(run.id, PACKET, {
       timeoutMs: 1_000,
       target: { runtime: "runtime-b", model: "critic-model" },
-      reasoningEffort: "maximum",
+      explicitReasoningEffort: "maximum",
     });
 
     expect(worker.inputs).toHaveLength(1);
@@ -251,6 +258,48 @@ describe("Orchestrator review (lot 7)", () => {
       { invocationId: workerInvocation?.id, stream: "stdout", chunk: "worker out\n" },
       { invocationId: criticInvocation?.id, stream: "stderr", chunk: "critic err\n" },
     ]);
+  });
+
+  it("refuses critic read-only execution when the adapter cannot enforce it", async () => {
+    const { adapter, inputs } = scriptedAgent(
+      [{ exitCode: 0 }, { exitCode: 0, lastMessage: FINDINGS_JSON }],
+      { readOnly: false, structuredOutput: true, reasoningEffort: [] },
+    );
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { review: true });
+
+    await expect(orchestrator.reviewRun(run.id, PACKET, { timeoutMs: 1_000 })).rejects.toThrow(
+      UnsupportedRuntimeCapabilityError,
+    );
+
+    expect(inputs).toHaveLength(1);
+    expect(run.invocations?.map((invocation) => invocation.role)).toEqual(["worker"]);
+    expect(orchestrator.events.ofType("review.started")).toHaveLength(0);
+    expect(orchestrator.events.ofType("agent.started")).toHaveLength(1);
+    expect(orchestrator.events.ofType("agent.completed")).toHaveLength(1);
+  });
+
+  it("refuses critic structured output when the adapter cannot produce it", async () => {
+    const { adapter, inputs } = scriptedAgent(
+      [{ exitCode: 0 }, { exitCode: 0, lastMessage: FINDINGS_JSON }],
+      { readOnly: true, structuredOutput: false, reasoningEffort: [] },
+    );
+    const orchestrator = makeOrchestrator(adapter, scriptedVerification([PASS]));
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    await orchestrator.verifyRun(run.id, { review: true });
+
+    await expect(orchestrator.reviewRun(run.id, PACKET, { timeoutMs: 1_000 })).rejects.toThrow(
+      UnsupportedRuntimeCapabilityError,
+    );
+
+    expect(inputs).toHaveLength(1);
+    expect(run.invocations?.map((invocation) => invocation.role)).toEqual(["worker"]);
+    expect(orchestrator.events.ofType("review.started")).toHaveLength(0);
+    expect(orchestrator.events.ofType("agent.started")).toHaveLength(1);
+    expect(orchestrator.events.ofType("agent.completed")).toHaveLength(1);
   });
 
   it("review works without verification commands (vacuous verify)", async () => {

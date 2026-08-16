@@ -311,23 +311,31 @@ This pass keeps the same serial workflow, but invocation targets are now real:
 - **RuntimeRegistry:** core defines the tiny `RuntimeRegistry` port and
   `StaticRuntimeRegistry` implementation (`runtime id -> AgentAdapter`). The
   CLI wires concrete adapters; core never imports Codex or Claude.
-- **Target resolution:** `runTask` selects explicit worker and critic targets
-  from CLI options. `Orchestrator` creates each `Invocation` with its target and
-  resolves the adapter from `invocation.target.runtime` immediately before
-  calling `run()`. Correction inherits the initial worker invocation target;
-  critic may use a distinct target.
+- **Target resolution and capability boundary:** `runTask` selects explicit
+  worker and critic targets from CLI options. `Orchestrator` resolves the
+  adapter from the requested target before creating an `Invocation`, then checks
+  the runtime capabilities required by that invocation: explicit reasoning
+  effort, read-only execution, and structured output. Correction inherits the
+  initial worker invocation target; critic may use a distinct target.
 - **Events:** `agent.started`, `agent.output`, and `agent.completed` all carry
   `invocationId`, so stdout/stderr chunks are attributable even when multiple
   runtimes participate in one run.
 - **Adapters:** Codex now reads `input.target.model`; it no longer carries model
   in the constructor. Claude Code was added as the second concrete adapter using
   installed/official CLI flags (`claude -p`, `--model`, `--effort`,
-  `--permission-mode`, `--tools`, `--json-schema`).
+  `--permission-mode`, `--tools`, `--json-schema`). When Conjunction requests a
+  schema, Claude uses `--output-format json` and the adapter extracts
+  `structured_output` from Claude's transport envelope before returning
+  `AgentRunResult.lastMessage`.
 - **Capabilities:** adapters expose `AgentCapabilities`. Codex supports
   read-only and structured output but declares no reasoning-effort mapping.
   Claude supports read-only, structured output, and maps Conjunction
   `low|medium|high|maximum` to Claude `low|medium|high|max`; `minimal` is not
   mapped.
+- **Claude Code headless limit:** the current non-interactive Claude mode can
+  perform edits with the selected permission mode. Non-trivial Bash command
+  access still needs an explicit future policy; Conjunction deliberately does
+  not grant a global `--allowedTools Bash`.
 
 `examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
 identical input. Conjunction does not build that application.

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { AgentRunInput, AgentRunResult, RuntimeRegistry } from "./agent.js";
+import type { AgentAdapter, AgentRunInput, AgentRunResult, RuntimeRegistry } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
 import { buildWorkerInstructions } from "./instructions.js";
 import type { ExecutionTarget, Invocation, ReasoningEffort } from "./invocation.js";
@@ -77,6 +77,16 @@ export class RuntimeNotFoundError extends Error {
   }
 }
 
+export class UnsupportedRuntimeCapabilityError extends Error {
+  constructor(
+    readonly runtime: string,
+    readonly capability: string,
+  ) {
+    super(`runtime "${runtime}" does not support ${capability}`);
+    this.name = "UnsupportedRuntimeCapabilityError";
+  }
+}
+
 /** The run is not in a state/shape that allows executing an agent on it. */
 export class RunNotExecutableError extends Error {
   constructor(reason: string) {
@@ -88,7 +98,8 @@ export class RunNotExecutableError extends Error {
 export interface ExecuteRunOptions {
   timeoutMs: number;
   target?: ExecutionTarget;
-  reasoningEffort?: ReasoningEffort;
+  /** User/request supplied effort. The default Conjunction intent is not a runtime requirement. */
+  explicitReasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
   /** Forwarded agent output, after it has been recorded as agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
@@ -97,6 +108,12 @@ export interface ExecuteRunOptions {
 type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
   ? Omit<E, "id" | "timestamp">
   : never;
+
+interface RuntimeCapabilityRequirements {
+  explicitReasoningEffort?: ReasoningEffort;
+  readOnly?: boolean;
+  outputSchema?: unknown;
+}
 
 /**
  * Drives the task/run lifecycle: creates tasks and runs, advances the run
@@ -261,7 +278,7 @@ export class Orchestrator {
       parentInvocationId?: string;
       role?: "worker" | "critic";
       target?: ExecutionTarget;
-      reasoningEffort?: ReasoningEffort;
+      explicitReasoningEffort?: ReasoningEffort;
       readOnly?: boolean;
       outputSchema?: unknown;
     },
@@ -275,37 +292,42 @@ export class Orchestrator {
       );
     }
 
+    const target = inputOptions?.target ?? options.target ?? run.target ?? { runtime: run.runtime };
+    const explicitReasoningEffort =
+      inputOptions?.explicitReasoningEffort ?? options.explicitReasoningEffort;
+    const reasoningEffort = explicitReasoningEffort ?? "medium";
+    const requirements: RuntimeCapabilityRequirements = {};
+    if (explicitReasoningEffort !== undefined) {
+      requirements.explicitReasoningEffort = explicitReasoningEffort;
+    }
+    if (inputOptions?.readOnly !== undefined) {
+      requirements.readOnly = inputOptions.readOnly;
+    }
+    if (inputOptions?.outputSchema !== undefined) {
+      requirements.outputSchema = inputOptions.outputSchema;
+    }
+    const adapter = this.#adapterForTarget(target, requirements);
+
     const invocationOptions: {
       parentInvocationId?: string;
-      target?: ExecutionTarget;
-      reasoningEffort?: ReasoningEffort;
+      target: ExecutionTarget;
+      reasoningEffort: ReasoningEffort;
       readOnly?: boolean;
-    } = {};
+    } = {
+      target,
+      reasoningEffort,
+    };
     if (inputOptions?.parentInvocationId !== undefined) {
       invocationOptions.parentInvocationId = inputOptions.parentInvocationId;
     }
     if (inputOptions?.readOnly !== undefined) {
       invocationOptions.readOnly = inputOptions.readOnly;
     }
-    if (inputOptions?.target !== undefined) {
-      invocationOptions.target = inputOptions.target;
-    } else if (options.target !== undefined) {
-      invocationOptions.target = options.target;
-    }
-    if (inputOptions?.reasoningEffort !== undefined) {
-      invocationOptions.reasoningEffort = inputOptions.reasoningEffort;
-    } else if (options.reasoningEffort !== undefined) {
-      invocationOptions.reasoningEffort = options.reasoningEffort;
-    }
     const invocation = this.#createInvocation(
       run,
       inputOptions?.role ?? "worker",
       invocationOptions,
     );
-    const adapter = this.deps.runtimeRegistry.get(invocation.target.runtime);
-    if (!adapter) {
-      throw new RuntimeNotFoundError(invocation.target.runtime);
-    }
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
@@ -539,20 +561,26 @@ export class Orchestrator {
       );
     }
 
-    this.#emit({ type: "review.started", taskId: run.taskId, runId: run.id, payload: {} });
     const parentInvocationId = run.attempts.at(-1)?.invocationId;
+    const target = options.target ?? run.target ?? { runtime: run.runtime };
+    const explicitReasoningEffort = options.explicitReasoningEffort;
+    const reasoningEffort = explicitReasoningEffort ?? "medium";
+    const requirements: RuntimeCapabilityRequirements = {
+      readOnly: true,
+      outputSchema: REVIEW_OUTPUT_SCHEMA,
+    };
+    if (explicitReasoningEffort !== undefined) {
+      requirements.explicitReasoningEffort = explicitReasoningEffort;
+    }
+    const adapter = this.#adapterForTarget(target, requirements);
+
+    this.#emit({ type: "review.started", taskId: run.taskId, runId: run.id, payload: {} });
     const invocation = this.#createInvocation(run, "critic", {
       ...(parentInvocationId !== undefined ? { parentInvocationId } : {}),
-      ...(options.target !== undefined ? { target: options.target } : {}),
-      ...(options.reasoningEffort !== undefined
-        ? { reasoningEffort: options.reasoningEffort }
-        : {}),
+      target,
+      reasoningEffort,
       readOnly: true,
     });
-    const adapter = this.deps.runtimeRegistry.get(invocation.target.runtime);
-    if (!adapter) {
-      throw new RuntimeNotFoundError(invocation.target.runtime);
-    }
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
@@ -670,6 +698,36 @@ export class Orchestrator {
 
   #timestamp(): string {
     return this.#now().toISOString();
+  }
+
+  #adapterForTarget(
+    target: ExecutionTarget,
+    requirements: RuntimeCapabilityRequirements,
+  ): AgentAdapter {
+    if (!this.deps.runtimeRegistry) {
+      throw new MissingDependencyError("runtimeRegistry");
+    }
+    const adapter = this.deps.runtimeRegistry.get(target.runtime);
+    if (!adapter) {
+      throw new RuntimeNotFoundError(target.runtime);
+    }
+    const capabilities = adapter.capabilities();
+    if (
+      requirements.explicitReasoningEffort !== undefined &&
+      !capabilities.reasoningEffort.includes(requirements.explicitReasoningEffort)
+    ) {
+      throw new UnsupportedRuntimeCapabilityError(
+        target.runtime,
+        `reasoning effort "${requirements.explicitReasoningEffort}"`,
+      );
+    }
+    if (requirements.readOnly === true && !capabilities.readOnly) {
+      throw new UnsupportedRuntimeCapabilityError(target.runtime, "read-only execution");
+    }
+    if (requirements.outputSchema !== undefined && !capabilities.structuredOutput) {
+      throw new UnsupportedRuntimeCapabilityError(target.runtime, "structured output");
+    }
+    return adapter;
   }
 
   #createInvocation(
