@@ -1,8 +1,4 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { promisify } from "node:util";
 
 import type {
@@ -11,8 +7,8 @@ import type {
   AgentCapabilities,
   AgentRunInput,
   AgentRunResult,
+  ReasoningEffort,
 } from "../../core/index.js";
-
 import { defaultSpawner, type ProcessSpawner } from "../process.js";
 
 const execFileAsync = promisify(execFile);
@@ -20,16 +16,18 @@ const execFileAsync = promisify(execFile);
 const DETECT_TIMEOUT_MS = 10_000;
 const DEFAULT_KILL_GRACE_MS = 5_000;
 
-/**
- * Hard safety floor: the agent always runs sandboxed, scoped to the run's
- * worktree. This is deliberately NOT a constructor option — never
- * `danger-full-access`, never `--dangerously-bypass-approvals-and-sandbox`.
- */
-const SANDBOX_MODE = "workspace-write";
+const READ_ONLY_TOOLS = "Read,Glob,Grep,LS";
 
-export interface CodexAdapterOptions {
-  /** Binary to invoke. Default: "codex" (resolved via PATH). */
-  codexBin?: string;
+const CLAUDE_EFFORT: Partial<Record<ReasoningEffort, string>> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  maximum: "max",
+};
+
+export interface ClaudeAdapterOptions {
+  /** Binary to invoke. Default: "claude" (resolved via PATH). */
+  claudeBin?: string;
   /** Process spawn seam, injected by tests. Default: child_process.spawn. */
   spawner?: ProcessSpawner;
   /** Grace period between SIGTERM and SIGKILL on timeout/abort. Default 5s. */
@@ -39,22 +37,24 @@ export interface CodexAdapterOptions {
 }
 
 /**
- * AgentAdapter for the Codex CLI (`codex exec`, non-interactive mode).
+ * AgentAdapter for Claude Code (`claude -p`, non-interactive print mode).
  *
- * Invocation: `codex exec -C <worktree> -s workspace-write --ephemeral
- * --color never -o <tmpfile> [-m <model>] -- <prompt>`.
- * The final agent message is read back from the `-o` file when written.
+ * Writer invocation: `claude -p --output-format text --no-session-persistence
+ * --permission-mode acceptEdits [--model <model>] [--effort <level>] <prompt>`.
+ *
+ * Read-only invocation: switches to `--permission-mode plan` and restricts the
+ * available built-in tools to read-only file navigation tools.
  */
-export class CodexAdapter implements AgentAdapter {
-  readonly id = "codex-cli";
+export class ClaudeAdapter implements AgentAdapter {
+  readonly id = "claude-code";
 
   #bin: string;
   #spawner: ProcessSpawner;
   #killGraceMs: number;
   #probeVersion: (bin: string) => Promise<string>;
 
-  constructor(options: CodexAdapterOptions = {}) {
-    this.#bin = options.codexBin ?? "codex";
+  constructor(options: ClaudeAdapterOptions = {}) {
+    this.#bin = options.claudeBin ?? "claude";
     this.#spawner = options.spawner ?? defaultSpawner;
     this.#killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
     this.#probeVersion =
@@ -71,8 +71,9 @@ export class CodexAdapter implements AgentAdapter {
     return {
       readOnly: true,
       structuredOutput: true,
-      // `codex exec --help` for 0.144.1 exposes no portable reasoning-effort flag.
-      reasoningEffort: [],
+      // Claude Code 2.1.220 exposes --effort low|medium|high|xhigh|max.
+      // Conjunction has no xhigh intent; `maximum` maps to `max`.
+      reasoningEffort: ["low", "medium", "high", "maximum"],
     };
   }
 
@@ -89,36 +90,20 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
-    const prompt = input.instructions;
-    const lastMessageFile = path.join(tmpdir(), `conjunction-codex-${randomUUID()}.txt`);
-
-    // Lot 7: the reviewer runs read-only — the ONLY two sandbox values this
-    // adapter can ever emit are "workspace-write" (implementer) and
-    // "read-only" (reviewer). Never danger-full-access, never configurable.
-    const sandbox = input.readOnly === true ? "read-only" : SANDBOX_MODE;
-
-    // Optional structured-output schema (codex --output-schema <FILE>).
-    let schemaFile: string | undefined;
-    if (input.outputSchema !== undefined) {
-      schemaFile = path.join(tmpdir(), `conjunction-schema-${randomUUID()}.json`);
-      await writeFile(schemaFile, JSON.stringify(input.outputSchema), "utf8");
-    }
-
     const args = [
-      "exec",
-      "-C",
-      input.workspacePath,
-      "-s",
-      sandbox,
-      "--ephemeral",
-      "--color",
-      "never",
-      "-o",
-      lastMessageFile,
-      ...(schemaFile !== undefined ? ["--output-schema", schemaFile] : []),
-      ...(input.target.model !== undefined ? ["-m", input.target.model] : []),
-      "--",
-      prompt,
+      "-p",
+      "--output-format",
+      "text",
+      "--no-session-persistence",
+      "--permission-mode",
+      input.readOnly === true ? "plan" : "acceptEdits",
+      ...(input.readOnly === true ? ["--tools", READ_ONLY_TOOLS] : []),
+      ...(input.target.model !== undefined ? ["--model", input.target.model] : []),
+      ...effortArgs(input.reasoningEffort),
+      ...(input.outputSchema !== undefined
+        ? ["--json-schema", JSON.stringify(input.outputSchema)]
+        : []),
+      input.instructions,
     ];
 
     const child = this.#spawner(this.#bin, args, {
@@ -130,6 +115,7 @@ export class CodexAdapter implements AgentAdapter {
       let settled = false;
       let timedOut = false;
       let aborted = false;
+      let stdout = "";
 
       const timeout = setTimeout(() => {
         timedOut = true;
@@ -148,20 +134,14 @@ export class CodexAdapter implements AgentAdapter {
           clearTimeout(killEscalation);
         }
         input.signal?.removeEventListener("abort", onAbort);
-        void readLastMessage(lastMessageFile).then((lastMessage) => {
-          if (schemaFile !== undefined) {
-            void rm(schemaFile, { force: true }).catch(() => {});
-          }
-          const result: AgentRunResult = { exitCode, timedOut, aborted };
-          if (lastMessage !== undefined) {
-            result.lastMessage = lastMessage;
-          }
-          resolve(result);
-        });
+        const result: AgentRunResult = { exitCode, timedOut, aborted };
+        const lastMessage = stdout.trim();
+        if (lastMessage.length > 0) {
+          result.lastMessage = lastMessage;
+        }
+        resolve(result);
       };
 
-      // detached=true made the child a process-group leader: signal the whole
-      // group so subprocesses codex spawned die too, then escalate to SIGKILL.
       const killTree = (): void => {
         const signalGroup = (signal: NodeJS.Signals): void => {
           if (child.pid !== undefined) {
@@ -169,7 +149,7 @@ export class CodexAdapter implements AgentAdapter {
               process.kill(-child.pid, signal);
               return;
             } catch {
-              // group kill unsupported or already gone; fall back to the child
+              // group kill unsupported or already gone; fall back to child
             }
           }
           child.kill(signal);
@@ -196,7 +176,9 @@ export class CodexAdapter implements AgentAdapter {
       }
 
       child.stdout.on("data", (chunk: Buffer) => {
-        input.onOutput?.(chunk.toString("utf8"), "stdout");
+        const text = chunk.toString("utf8");
+        stdout += text;
+        input.onOutput?.(text, "stdout");
       });
       child.stderr.on("data", (chunk: Buffer) => {
         input.onOutput?.(chunk.toString("utf8"), "stderr");
@@ -212,14 +194,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-async function readLastMessage(file: string): Promise<string | undefined> {
-  let content: string | undefined;
-  try {
-    const raw = (await readFile(file, "utf8")).trim();
-    content = raw.length > 0 ? raw : undefined;
-  } catch {
-    // codex never wrote the file (crashed, killed, or had nothing to say)
-  }
-  await rm(file, { force: true }).catch(() => {});
-  return content;
+function effortArgs(effort: ReasoningEffort): string[] {
+  const mapped = CLAUDE_EFFORT[effort];
+  return mapped === undefined ? [] : ["--effort", mapped];
 }

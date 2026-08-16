@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { AgentAdapter, AgentRunInput, AgentRunResult } from "./agent.js";
+import type { AgentRunInput, AgentRunResult, RuntimeRegistry } from "./agent.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
 import { buildWorkerInstructions } from "./instructions.js";
 import type { ExecutionTarget, Invocation, ReasoningEffort } from "./invocation.js";
@@ -44,7 +44,7 @@ export interface VerificationRunner {
 export interface OrchestratorDeps {
   workspace?: WorkspaceProvider;
   verification?: VerificationRunner;
-  agent?: AgentAdapter;
+  runtimeRegistry?: RuntimeRegistry;
   createId?: () => string;
   now?: () => Date;
 }
@@ -70,6 +70,13 @@ export class MissingDependencyError extends Error {
   }
 }
 
+export class RuntimeNotFoundError extends Error {
+  constructor(readonly runtime: string) {
+    super(`unknown agent runtime: ${runtime}`);
+    this.name = "RuntimeNotFoundError";
+  }
+}
+
 /** The run is not in a state/shape that allows executing an agent on it. */
 export class RunNotExecutableError extends Error {
   constructor(reason: string) {
@@ -80,6 +87,8 @@ export class RunNotExecutableError extends Error {
 
 export interface ExecuteRunOptions {
   timeoutMs: number;
+  target?: ExecutionTarget;
+  reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
   /** Forwarded agent output, after it has been recorded as agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
@@ -94,8 +103,8 @@ type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
  * state machine, and appends every state change to the event store.
  *
  * Deliberately NOT here: persistence, scheduling, or any multi-agent
- * coordination. The agent itself is injected as an AgentAdapter port; core
- * never imports a concrete runtime.
+ * coordination. Agent runtimes are resolved through a tiny RuntimeRegistry
+ * port; core never imports a concrete runtime.
  */
 export class Orchestrator {
   readonly events = new EventStore();
@@ -212,10 +221,21 @@ export class Orchestrator {
     }
     const failedCommands = failedCommandNames(run);
     const parentInvocationId = run.attempts[0]?.invocationId;
-    const result = await this.#executeAgentAttempt(run, task, options, {
+    const correctionInput: {
+      instructions: string;
+      parentInvocationId?: string;
+      target?: ExecutionTarget;
+    } = {
       instructions: packet,
-      ...(parentInvocationId !== undefined ? { parentInvocationId } : {}),
-    });
+    };
+    if (parentInvocationId !== undefined) {
+      correctionInput.parentInvocationId = parentInvocationId;
+    }
+    const parentTarget = this.#invocationById(run, parentInvocationId)?.target;
+    if (parentTarget !== undefined) {
+      correctionInput.target = parentTarget;
+    }
+    const result = await this.#executeAgentAttempt(run, task, options, correctionInput);
     if (!result.aborted && !result.timedOut && result.exitCode === 0) {
       this.#emit({
         type: "correction.completed",
@@ -240,12 +260,14 @@ export class Orchestrator {
       instructions?: string;
       parentInvocationId?: string;
       role?: "worker" | "critic";
+      target?: ExecutionTarget;
+      reasoningEffort?: ReasoningEffort;
       readOnly?: boolean;
       outputSchema?: unknown;
     },
   ): Promise<AgentRunResult> {
-    if (!this.deps.agent) {
-      throw new MissingDependencyError("agent");
+    if (!this.deps.runtimeRegistry) {
+      throw new MissingDependencyError("runtimeRegistry");
     }
     if (run.workspacePath === undefined) {
       throw new RunNotExecutableError(
@@ -255,6 +277,8 @@ export class Orchestrator {
 
     const invocationOptions: {
       parentInvocationId?: string;
+      target?: ExecutionTarget;
+      reasoningEffort?: ReasoningEffort;
       readOnly?: boolean;
     } = {};
     if (inputOptions?.parentInvocationId !== undefined) {
@@ -263,11 +287,25 @@ export class Orchestrator {
     if (inputOptions?.readOnly !== undefined) {
       invocationOptions.readOnly = inputOptions.readOnly;
     }
+    if (inputOptions?.target !== undefined) {
+      invocationOptions.target = inputOptions.target;
+    } else if (options.target !== undefined) {
+      invocationOptions.target = options.target;
+    }
+    if (inputOptions?.reasoningEffort !== undefined) {
+      invocationOptions.reasoningEffort = inputOptions.reasoningEffort;
+    } else if (options.reasoningEffort !== undefined) {
+      invocationOptions.reasoningEffort = options.reasoningEffort;
+    }
     const invocation = this.#createInvocation(
       run,
       inputOptions?.role ?? "worker",
       invocationOptions,
     );
+    const adapter = this.deps.runtimeRegistry.get(invocation.target.runtime);
+    if (!adapter) {
+      throw new RuntimeNotFoundError(invocation.target.runtime);
+    }
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
@@ -289,6 +327,8 @@ export class Orchestrator {
     });
 
     const input: AgentRunInput = {
+      target: invocation.target,
+      reasoningEffort: invocation.reasoningEffort,
       instructions: inputOptions?.instructions ?? buildWorkerInstructions(task),
       workspacePath: run.workspacePath,
       timeoutMs: options.timeoutMs,
@@ -297,7 +337,7 @@ export class Orchestrator {
           type: "agent.output",
           taskId: run.taskId,
           runId: run.id,
-          payload: { stream, chunk },
+          payload: { invocationId: invocation.id, stream, chunk },
         });
         options.onOutput?.(chunk, stream);
       },
@@ -312,7 +352,7 @@ export class Orchestrator {
       input.outputSchema = inputOptions.outputSchema;
     }
 
-    const result = await this.deps.agent.run(input);
+    const result = await adapter.run(input);
 
     attempt.completedAt = this.#timestamp();
     attempt.agentResult = {
@@ -487,8 +527,8 @@ export class Orchestrator {
   async reviewRun(runId: string, packet: string, options: ExecuteRunOptions): Promise<Run> {
     const run = this.#requireRun(runId);
     const task = this.#requireTask(run.taskId);
-    if (!this.deps.agent) {
-      throw new MissingDependencyError("agent");
+    if (!this.deps.runtimeRegistry) {
+      throw new MissingDependencyError("runtimeRegistry");
     }
     if (run.state !== "reviewing") {
       throw new RunNotExecutableError(`state must be "reviewing", got "${run.state}"`);
@@ -503,8 +543,16 @@ export class Orchestrator {
     const parentInvocationId = run.attempts.at(-1)?.invocationId;
     const invocation = this.#createInvocation(run, "critic", {
       ...(parentInvocationId !== undefined ? { parentInvocationId } : {}),
+      ...(options.target !== undefined ? { target: options.target } : {}),
+      ...(options.reasoningEffort !== undefined
+        ? { reasoningEffort: options.reasoningEffort }
+        : {}),
       readOnly: true,
     });
+    const adapter = this.deps.runtimeRegistry.get(invocation.target.runtime);
+    if (!adapter) {
+      throw new RuntimeNotFoundError(invocation.target.runtime);
+    }
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
@@ -516,6 +564,8 @@ export class Orchestrator {
     });
 
     const input: AgentRunInput = {
+      target: invocation.target,
+      reasoningEffort: invocation.reasoningEffort,
       instructions: packet,
       workspacePath: run.workspacePath,
       timeoutMs: options.timeoutMs,
@@ -526,7 +576,7 @@ export class Orchestrator {
           type: "agent.output",
           taskId: run.taskId,
           runId: run.id,
-          payload: { stream, chunk },
+          payload: { invocationId: invocation.id, stream, chunk },
         });
         options.onOutput?.(chunk, stream);
       },
@@ -535,7 +585,7 @@ export class Orchestrator {
       input.signal = options.signal;
     }
 
-    const result = await this.deps.agent.run(input);
+    const result = await adapter.run(input);
     const agentResult: AgentAttemptOutcome = {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
@@ -627,6 +677,7 @@ export class Orchestrator {
     role: Invocation["role"],
     options: {
       parentInvocationId?: string;
+      target?: ExecutionTarget;
       reasoningEffort?: ReasoningEffort;
       readOnly?: boolean;
     } = {},
@@ -638,7 +689,7 @@ export class Orchestrator {
         ? { parentInvocationId: options.parentInvocationId }
         : {}),
       role,
-      target: run.target ?? { runtime: run.runtime },
+      target: options.target ?? run.target ?? { runtime: run.runtime },
       reasoningEffort: options.reasoningEffort ?? "medium",
       createdAt: this.#timestamp(),
       state: "pending",
@@ -656,5 +707,12 @@ export class Orchestrator {
       timestamp: this.#timestamp(),
     } as ConjunctionEvent;
     this.events.append(event);
+  }
+
+  #invocationById(run: Run, invocationId: string | undefined): Invocation | undefined {
+    if (invocationId === undefined) {
+      return undefined;
+    }
+    return run.invocations?.find((invocation) => invocation.id === invocationId);
   }
 }

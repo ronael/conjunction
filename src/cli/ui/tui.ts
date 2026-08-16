@@ -1,10 +1,10 @@
 import { render } from "ink";
 import React from "react";
 
-import type { AgentAdapter } from "../../core/index.js";
+import type { RuntimeRegistry } from "../../core/index.js";
 import { findRepoRoot } from "../../workspace/index.js";
 import type { RunTaskOptions } from "../run-command.js";
-import { runTask } from "../run-command.js";
+import { runTask, selectedRuntimeTargets } from "../run-command.js";
 
 import { RunApp } from "./run-app.js";
 import { RunModel } from "./run-model.js";
@@ -17,16 +17,34 @@ import { RunModel } from "./run-model.js";
  */
 export async function runWithTui(
   options: RunTaskOptions,
-  deps: { adapter: AgentAdapter },
+  deps: { runtimeRegistry: RuntimeRegistry },
 ): Promise<number> {
   // Preflight in plain text: a TUI makes no sense when setup cannot succeed.
-  const availability = await deps.adapter.detect();
-  if (!availability.available) {
-    process.stdout.write(
-      `error: agent runtime "${deps.adapter.id}" is not available: ` +
-        `${availability.reason ?? "unknown reason"}\n`,
-    );
-    return 2;
+  for (const selected of selectedRuntimeTargets(options, options.workflow === "review")) {
+    const adapter = deps.runtimeRegistry.get(selected.target.runtime);
+    if (!adapter) {
+      process.stdout.write(`error: unknown agent runtime "${selected.target.runtime}"\n`);
+      return 2;
+    }
+    if (
+      selected.explicitEffort !== undefined &&
+      !adapter.capabilities().reasoningEffort.includes(selected.explicitEffort)
+    ) {
+      const supported = adapter.capabilities().reasoningEffort;
+      process.stdout.write(
+        `error: runtime "${adapter.id}" does not support reasoning effort ` +
+          `"${selected.explicitEffort}" (supported: ${supported.join(", ") || "none"})\n`,
+      );
+      return 2;
+    }
+    const availability = await adapter.detect();
+    if (!availability.available) {
+      process.stdout.write(
+        `error: agent runtime "${adapter.id}" is not available: ` +
+          `${availability.reason ?? "unknown reason"}\n`,
+      );
+      return 2;
+    }
   }
   try {
     await findRepoRoot(options.repoPath);
@@ -62,7 +80,7 @@ export async function runWithTui(
   );
 
   const result = await runTask(options, {
-    adapter: deps.adapter,
+    runtimeRegistry: deps.runtimeRegistry,
     out: () => {}, // the TUI renders everything; plain text stays for plain mode
     signal: controller.signal,
     observer: {

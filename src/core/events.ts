@@ -29,7 +29,9 @@ export interface AgentStartedEvent
   extends EventBase<"agent.started", { runtime: string; invocationId: string }>, RunScoped {}
 
 export interface AgentOutputEvent
-  extends EventBase<"agent.output", { stream: "stdout" | "stderr"; chunk: string }>, RunScoped {}
+  extends
+    EventBase<"agent.output", { invocationId: string; stream: "stdout" | "stderr"; chunk: string }>,
+    RunScoped {}
 
 export interface AgentCompletedEvent
   extends

@@ -1,6 +1,15 @@
 import path from "node:path";
 
-import type { AgentAdapter, Run, RunReview, RunState, Task, WorkflowName } from "../core/index.js";
+import type {
+  ExecutionTarget,
+  ReasoningEffort,
+  Run,
+  RunReview,
+  RunState,
+  RuntimeRegistry,
+  Task,
+  WorkflowName,
+} from "../core/index.js";
 import {
   buildCorrectionPacket,
   buildReviewerPacket,
@@ -53,13 +62,50 @@ function agentStepLine(run: Run, label: string): string {
   return stepLine("✓", label, attemptDuration(attempt));
 }
 
+export interface SelectedRuntimeTarget {
+  role: "worker" | "critic";
+  target: ExecutionTarget;
+  explicitEffort?: ReasoningEffort;
+}
+
+export function selectedRuntimeTargets(
+  options: RunTaskOptions,
+  includeCritic: boolean,
+): SelectedRuntimeTarget[] {
+  const selected: SelectedRuntimeTarget[] = [
+    {
+      role: "worker",
+      target: options.workerTarget,
+      ...(options.workerReasoningEffort !== undefined
+        ? { explicitEffort: options.workerReasoningEffort }
+        : {}),
+    },
+  ];
+  if (includeCritic) {
+    selected.push({
+      role: "critic",
+      target: options.criticTarget ?? options.workerTarget,
+      ...(options.criticReasoningEffort !== undefined
+        ? { explicitEffort: options.criticReasoningEffort }
+        : {}),
+    });
+  }
+  return selected;
+}
+
 export interface RunTaskOptions {
   /** The run's source of truth: inline description or loaded brief file. */
   brief: Brief;
   /** Which participants take part. Correction is orthogonal (see `correct`). */
   workflow: WorkflowName;
-  /** Optional model id recorded on the execution target; adapters map it separately. */
-  model?: string;
+  /** Target used for worker invocations (initial + correction). */
+  workerTarget: ExecutionTarget;
+  /** Explicit worker effort intent; default is recorded as medium by core. */
+  workerReasoningEffort?: ReasoningEffort;
+  /** Target used for the critic invocation; defaults to the worker target. */
+  criticTarget?: ExecutionTarget;
+  /** Explicit critic effort intent; default is recorded as medium by core. */
+  criticReasoningEffort?: ReasoningEffort;
   repoPath: string;
   /** Empty list = no verification; the run still completes (vacuous pass). */
   verifyCommands: VerificationCommand[];
@@ -95,7 +141,7 @@ export interface RunObserver {
 }
 
 export interface RunTaskDeps {
-  adapter: AgentAdapter;
+  runtimeRegistry: RuntimeRegistry;
   out: (chunk: string) => void;
   observer?: RunObserver;
   /** Cancellation (q / Ctrl-C): forwarded to Orchestrator.executeRun. */
@@ -121,15 +167,37 @@ export interface RunTaskResult {
  * the run completed (agent clean + verification passed/vacuous).
  */
 export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promise<RunTaskResult> {
-  const { out, adapter, observer } = deps;
+  const { out, observer } = deps;
+  const review = workflowIncludes(options.workflow, "critic");
+  const selectedTargets = selectedRuntimeTargets(options, review);
 
-  const availability = await adapter.detect();
-  if (!availability.available) {
-    out(
-      `error: agent runtime "${adapter.id}" is not available: ` +
-        `${availability.reason ?? "unknown reason"}\n`,
-    );
-    return { exitCode: 2, repoRoot: "", storeDir: "" };
+  for (const selected of selectedTargets) {
+    const adapter = deps.runtimeRegistry.get(selected.target.runtime);
+    if (!adapter) {
+      out(
+        `error: unknown agent runtime "${selected.target.runtime}" ` +
+          `(available: ${deps.runtimeRegistry.ids().join(", ") || "none"})\n`,
+      );
+      return { exitCode: 2, repoRoot: "", storeDir: "" };
+    }
+    if (selected.explicitEffort !== undefined) {
+      const supported = adapter.capabilities().reasoningEffort;
+      if (!supported.includes(selected.explicitEffort)) {
+        out(
+          `error: runtime "${adapter.id}" does not support reasoning effort ` +
+            `"${selected.explicitEffort}" (supported: ${supported.join(", ") || "none"})\n`,
+        );
+        return { exitCode: 2, repoRoot: "", storeDir: "" };
+      }
+    }
+    const availability = await adapter.detect();
+    if (!availability.available) {
+      out(
+        `error: agent runtime "${adapter.id}" is not available: ` +
+          `${availability.reason ?? "unknown reason"}\n`,
+      );
+      return { exitCode: 2, repoRoot: "", storeDir: "" };
+    }
   }
 
   let repoRoot: string;
@@ -178,7 +246,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         return lastVerification;
       },
     },
-    agent: adapter,
+    runtimeRegistry: deps.runtimeRegistry,
   });
 
   const store = new RunStore(path.join(repoRoot, ".conjunction", "runs"));
@@ -213,19 +281,12 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   };
 
   const { brief } = options;
-  // The critic is a workflow participant; correction is a bound on the worker
-  // and stays orthogonal (see docs/brief-workflow-design.md §5.2).
-  const review = workflowIncludes(options.workflow, "critic");
   const task = orchestrator.createTask({
     title: brief.title,
     objective: brief.content,
     source: brief.source,
   });
-  const run = orchestrator.createRun(
-    task.id,
-    options.model !== undefined ? { runtime: adapter.id, model: options.model } : adapter.id,
-    options.workflow,
-  );
+  const run = orchestrator.createRun(task.id, options.workerTarget, options.workflow);
   out(`run:      ${run.id}\ntask:     ${task.title}\n`);
   if (brief.source.kind === "file") {
     out(`brief:    ${brief.source.path}\n`);
@@ -254,6 +315,10 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
 
     const executeOptions: Parameters<Orchestrator["executeRun"]>[1] = {
       timeoutMs: options.timeoutMinutes * 60_000,
+      target: options.workerTarget,
+      ...(options.workerReasoningEffort !== undefined
+        ? { reasoningEffort: options.workerReasoningEffort }
+        : {}),
       onOutput: (chunk, stream) => {
         observer?.agentOutput?.(chunk, stream);
         out(chunk);
@@ -346,7 +411,16 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
           passed: !result.timedOut && result.exitCode === 0,
         })),
       });
-      await orchestrator.reviewRun(run.id, packet, executeOptions);
+      const criticOptions: Parameters<Orchestrator["reviewRun"]>[2] = {
+        ...executeOptions,
+        target: options.criticTarget ?? options.workerTarget,
+      };
+      if (options.criticReasoningEffort !== undefined) {
+        criticOptions.reasoningEffort = options.criticReasoningEffort;
+      } else {
+        delete criticOptions.reasoningEffort;
+      }
+      await orchestrator.reviewRun(run.id, packet, criticOptions);
       await flush(task, run);
 
       const review = run.review;

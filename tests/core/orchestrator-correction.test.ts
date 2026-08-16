@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_CORRECTIONS_PER_RUN,
   Orchestrator,
+  StaticRuntimeRegistry,
   RunNotExecutableError,
   transitionRun,
   type AgentAdapter,
@@ -31,6 +32,7 @@ function scriptedAgent(
     inputs,
     adapter: {
       id: "stub-agent",
+      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);
@@ -68,7 +70,13 @@ const PASS: VerificationOutcome = {
 };
 
 function makeOrchestrator(agent: AgentAdapter, verification: VerificationRunner) {
-  return new Orchestrator({ createId, now, workspace: stubWorkspace, agent, verification });
+  return new Orchestrator({
+    createId,
+    now,
+    workspace: stubWorkspace,
+    runtimeRegistry: new StaticRuntimeRegistry([agent]),
+    verification,
+  });
 }
 
 async function runningRun(orchestrator: Orchestrator) {

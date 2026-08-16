@@ -30,8 +30,11 @@ export {
 export {
   type AgentAdapter,
   type AgentAvailability,
+  type AgentCapabilities,
   type AgentRunInput,
   type AgentRunResult,
+  StaticRuntimeRegistry,
+  type RuntimeRegistry,
 } from "./agent.js";
 export {
   assertTransition,
@@ -97,6 +100,7 @@ export {
   Orchestrator,
   RunNotExecutableError,
   RunNotFoundError,
+  RuntimeNotFoundError,
   TaskNotFoundError,
   type ExecuteRunOptions,
   type OrchestratorDeps,

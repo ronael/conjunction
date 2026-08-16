@@ -14,8 +14,9 @@ instead. This document is the "learn by doing" companion.
 
 Conjunction is a **single-command orchestration runtime for coding agents**.
 
-Today it drives OpenAI's **Codex CLI** to do a task in complete isolation, then
-lets you review and bring the result back to your own branch. Its core promise:
+Today it drives an agent runtime such as **Codex CLI** or **Claude Code** to do
+a task in complete isolation, then lets you review and bring the result back to
+your own branch. Its core promise:
 
 > **The agent never touches your branch.** It works in a throwaway git worktree
 > on a local branch. When you're happy with the result, you land it back onto
@@ -41,17 +42,27 @@ multi-agent orchestration — the single-agent loop comes first.
 
 - **Node.js >= 20**
 - **git** (the whole design is built on git worktrees)
-- **The Codex CLI** — `codex exec` must work:
+- **At least one agent runtime**. Codex is the default:
+
   ```bash
   codex --version
   ```
+
   (Conjunction shells out to `codex exec`; the agent is codex itself.)
+
+  Claude Code is optional unless selected with `--runtime claude-code` or
+  `--critic-runtime claude-code`:
+
+  ```bash
+  claude --version
+  ```
 
 Verifying all of this is done by Conjunction automatically:
 
 ```bash
 node dist/cli/main.js doctor
 # agent runtime "codex-cli": available (codex-cli 0.x.x)
+node dist/cli/main.js doctor --runtime claude-code
 ```
 
 ---
@@ -83,8 +94,13 @@ The `--help` output is your map of the whole tool:
 conjunction — orchestration runtime for coding agents
 
 usage:
-  conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
-                           [--timeout <minutes>] [--model <model>] [--cleanup]
+  conjunction run "<task>" | <brief.md> | --brief <file>
+                           [--workflow single|review]
+                           [--repo <path>] [--verify "<cmd> [args...]"]...
+                           [--runtime <id>] [--model <model>] [--effort <level>]
+                           [--critic-runtime <id>] [--critic-model <model>]
+                           [--critic-effort <level>]
+                           [--timeout <minutes>] [--cleanup]
                            [--plain] [--no-correct] [--review]
   conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
   conjunction status [--repo <path>]

@@ -4,6 +4,7 @@ import {
   MissingDependencyError,
   Orchestrator,
   RunNotExecutableError,
+  StaticRuntimeRegistry,
   type AgentAdapter,
   type AgentRunInput,
   type AgentRunResult,
@@ -32,6 +33,7 @@ function stubAgent(
     inputs,
     adapter: {
       id: "stub-agent",
+      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);
@@ -62,7 +64,7 @@ describe("Orchestrator.executeRun", () => {
       createId,
       now,
       workspace: stubWorkspace,
-      agent: adapter,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
     });
     const { run } = await runningRun(orchestrator);
     const forwarded: string[] = [];
@@ -98,10 +100,13 @@ describe("Orchestrator.executeRun", () => {
       "agent.completed",
     ]);
     const outputs = orchestrator.events.ofType("agent.output");
-    expect(outputs.map((e) => [e.payload.stream, e.payload.chunk])).toEqual([
-      ["stdout", "working…\n"],
-      ["stderr", "warning\n"],
-    ]);
+    const invocationId = run.invocations?.[0]?.id;
+    expect(outputs.map((e) => [e.payload.invocationId, e.payload.stream, e.payload.chunk])).toEqual(
+      [
+        [invocationId, "stdout", "working…\n"],
+        [invocationId, "stderr", "warning\n"],
+      ],
+    );
     expect(forwarded).toEqual(["working…\n", "warning\n"]);
   });
 
@@ -111,7 +116,7 @@ describe("Orchestrator.executeRun", () => {
       createId,
       now,
       workspace: stubWorkspace,
-      agent: adapter,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
     });
     const { task, run } = await runningRun(orchestrator);
 
@@ -129,7 +134,7 @@ describe("Orchestrator.executeRun", () => {
       createId,
       now,
       workspace: stubWorkspace,
-      agent: adapter,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
     });
     const { run } = await runningRun(orchestrator);
     await orchestrator.executeRun(run.id, { timeoutMs: 5_000 });
@@ -143,7 +148,7 @@ describe("Orchestrator.executeRun", () => {
       createId,
       now,
       workspace: stubWorkspace,
-      agent: adapter,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
     });
     const { run } = await runningRun(orchestrator);
     await orchestrator.executeRun(run.id, { timeoutMs: 5_000 });
@@ -165,7 +170,7 @@ describe("Orchestrator.executeRun", () => {
       createId,
       now,
       workspace: stubWorkspace,
-      agent: adapter,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
     });
     const task = orchestrator.createTask({ title: "t", objective: "o" });
     const run = orchestrator.createRun(task.id, "stub-agent");
@@ -176,7 +181,11 @@ describe("Orchestrator.executeRun", () => {
 
   it("refuses to run an agent without a workspace", async () => {
     const { adapter } = stubAgent(() => {}, {});
-    const orchestrator = new Orchestrator({ createId, now, agent: adapter });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
     const task = orchestrator.createTask({ title: "t", objective: "o" });
     const run = orchestrator.createRun(task.id, "stub-agent");
     await orchestrator.startRun(run.id); // no workspace provider -> no workspacePath

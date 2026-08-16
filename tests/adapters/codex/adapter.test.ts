@@ -88,10 +88,14 @@ describeAgentAdapterContract("CodexAdapter", {
     };
   },
   promptFromCall: (call) => call.args[call.args.indexOf("--") + 1],
-  sandboxFromCall: (call) => call.args[call.args.indexOf("-s") + 1],
+  assertReadOnlyTransport: (call) => {
+    expect(call.args[call.args.indexOf("-s") + 1]).toBe("read-only");
+  },
 });
 
 const baseInput = {
+  target: { runtime: "codex-cli" },
+  reasoningEffort: "medium" as const,
   instructions: buildWorkerInstructions(makeTask()),
   workspacePath: "/tmp/worktree",
   timeoutMs: 1_000,
@@ -151,10 +155,18 @@ describe("CodexAdapter.run invocation", () => {
 
   it("passes the model override when configured", async () => {
     const fake = fakeSpawn((child) => child.exit(0));
-    const adapter = new CodexAdapter({ spawner: fake.spawner, model: "gpt-5-codex" });
-    await adapter.run(baseInput);
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    await adapter.run({ ...baseInput, target: { runtime: "codex-cli", model: "gpt-5-codex" } });
     const args = fake.calls[0]?.args ?? [];
     expect(args[args.indexOf("-m") + 1]).toBe("gpt-5-codex");
+  });
+
+  it("does not claim reasoning effort support or emit an effort flag", async () => {
+    const fake = fakeSpawn((child) => child.exit(0));
+    const adapter = new CodexAdapter({ spawner: fake.spawner });
+    expect(adapter.capabilities().reasoningEffort).toEqual([]);
+    await adapter.run({ ...baseInput, reasoningEffort: "high" });
+    expect(fake.calls[0]?.args.join(" ")).not.toContain("effort");
   });
 });
 

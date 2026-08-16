@@ -376,10 +376,10 @@ The constraint holds structurally today:
 | **Runtime** — how it is executed       | `Invocation.target.runtime`, plus legacy `Run.runtime` for compatibility                                                                                         | runtime registry in the CLI |
 | **Model** — which AI                   | `Invocation.target.model?`, populated from `--model` when present                                                                                                | per-role target resolution  |
 
-`RoleAssignment { role, adapter, model }` is **not implemented**. V1 Lot 1 adds
-only the persisted `ExecutionTarget` on each invocation; with exactly one
-adapter and one `--model` flag, a resolver would still be a lookup table with a
-single possible value. Runtime selection lands with the multi-runtime lot.
+`RoleAssignment { role, adapter, model }` is **not implemented**. V1 Lot 2 adds
+a minimal runtime registry and explicit per-role execution targets, without a
+Driver-owned assignment policy. Intelligent runtime selection remains future
+work.
 
 Nothing named `CodexWorker` or `ClaudeReviewer` exists or may exist in core.
 Core names roles; adapters name runtimes; the CLI wires the two together.
@@ -565,7 +565,7 @@ runtimes or models.
 | Fetching briefs over http(s)                                                       | rejected | mutable remote breaks run reproducibility; no network in the engine                 |
 | `--workflow quality` registered now                                                | rejected | names a pipeline that cannot run; unknown-workflow error is more honest             |
 | Driver workflow implemented now                                                    | rejected | no Driver LLM in Lot 1; only the vocabulary and invocation record are needed        |
-| Runtime resolver implemented now                                                   | rejected | one adapter + one model = a mapping with one possible value (§5.5)                  |
+| Intelligent runtime routing implemented now                                        | rejected | explicit targets are enough until a Driver exists (§5.5)                            |
 | YAML/DSL workflow definitions                                                      | rejected | a configuration language with nothing yet to configure (§5.4)                       |
 | `ContextPacket` common abstraction                                                 | rejected | indirection over two pure functions that share no logic (§6)                        |
 | Extracting `WorkflowExecutor` now                                                  | rejected | would have exactly one shape, validated by nothing (§7)                             |
@@ -573,7 +573,7 @@ runtimes or models.
 | Precedence rule for `--workflow single --review`                                   | rejected | ambiguity should be an error, not a silent winner (§5.3)                            |
 
 **Challenge #9 — which proposed abstractions would be premature?**
-runtime resolver, `ContextPacket`, `Plan`/`Subtask`/`DriverDecision`, a
+intelligent router, `ContextPacket`, `Plan`/`Subtask`/`DriverDecision`, a
 workflow DSL, and `WorkflowExecutor`. All five are specified above and none are
 in `src/`.
 
@@ -581,8 +581,8 @@ in `src/`.
 what this branch ships: one optional provenance field on `Task`, one optional
 workflow field on `Run`, explicit invocations carrying role/target/effort, a
 two-entry workflow table with a role list, and a brief loader in the composition
-root. Every future step — Driver behavior, per-role runtime resolution, plans —
-is an _addition_ to those, not a change of them.
+root. Every future step — Driver behavior, runtime selection policy, plans — is
+an _addition_ to those, not a change of them.
 
 ---
 

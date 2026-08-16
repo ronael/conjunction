@@ -1,6 +1,19 @@
 import { CodexAdapter } from "../adapters/codex/index.js";
-import type { AgentAdapter, WorkflowName } from "../core/index.js";
-import { DEFAULT_WORKFLOW, isWorkflowName, WORKFLOW_NAMES, WORKFLOWS } from "../core/index.js";
+import { ClaudeAdapter } from "../adapters/claude/index.js";
+import type {
+  AgentAdapter,
+  ExecutionTarget,
+  ReasoningEffort,
+  RuntimeRegistry,
+  WorkflowName,
+} from "../core/index.js";
+import {
+  DEFAULT_WORKFLOW,
+  isWorkflowName,
+  StaticRuntimeRegistry,
+  WORKFLOW_NAMES,
+  WORKFLOWS,
+} from "../core/index.js";
 import type { VerificationCommand } from "../verification/index.js";
 
 import { parseArgs, UsageError } from "./args.js";
@@ -10,6 +23,14 @@ import { runTask } from "./run-command.js";
 import { statusCommand } from "./status-command.js";
 
 const DEFAULT_TIMEOUT_MINUTES = 10;
+const DEFAULT_RUNTIME = "codex-cli";
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "maximum",
+];
 
 const USAGE = `conjunction — orchestration runtime for coding agents
 
@@ -17,14 +38,17 @@ usage:
   conjunction run "<task>" | <brief.md> | --brief <file>
                            [--workflow ${WORKFLOW_NAMES.join("|")}]
                            [--repo <path>] [--verify "<cmd> [args...]"]...
-                           [--timeout <minutes>] [--model <model>] [--cleanup]
+                           [--runtime <id>] [--model <model>] [--effort <level>]
+                           [--critic-runtime <id>] [--critic-model <model>]
+                           [--critic-effort <level>]
+                           [--timeout <minutes>] [--cleanup]
                            [--plain] [--no-correct] [--review]
   conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
   conjunction status [--repo <path>]
   conjunction doctor
 
 commands:
-  run      execute a brief in an isolated git worktree via the codex adapter
+  run      execute a brief in an isolated git worktree via a selected runtime
   land     apply a completed run's changes onto your branch (uncommitted)
   status   list runs recorded under .conjunction/runs/
   doctor   check that the agent runtime (codex cli) is available
@@ -43,6 +67,8 @@ notes:
   deterministic feedback, not a separate role.
   --review is an alias for --workflow review (independent READ-ONLY critic
   after verification passes); findings are advisory and never change the exit code.
+  --runtime defaults to ${DEFAULT_RUNTIME}; --critic-runtime defaults to the worker runtime.
+  reasoning effort values: ${REASONING_EFFORTS.join("|")}.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
   Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
@@ -51,6 +77,7 @@ notes:
 export interface CliDeps {
   /** Adapter injection seam for tests; defaults to the real Codex CLI. */
   adapter?: AgentAdapter;
+  runtimeRegistry?: RuntimeRegistry;
   out?: (chunk: string) => void;
 }
 
@@ -66,7 +93,19 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
     switch (command) {
       case "run": {
         const parsed = parseArgs(rest, {
-          valueOptions: ["repo", "verify", "timeout", "model", "brief", "workflow"],
+          valueOptions: [
+            "repo",
+            "verify",
+            "timeout",
+            "model",
+            "brief",
+            "workflow",
+            "runtime",
+            "critic-runtime",
+            "critic-model",
+            "effort",
+            "critic-effort",
+          ],
           flags: ["cleanup", "help", "plain", "no-correct", "review"],
         });
         if (parsed.flags.has("help")) {
@@ -86,18 +125,32 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           process.cwd(),
         );
         const timeoutMinutes = parseTimeout(parsed.options.timeout?.at(-1));
-        const model = parsed.options.model?.at(-1);
-        const adapter =
-          deps.adapter ?? new CodexAdapter(model !== undefined ? { model } : undefined);
+        const runtimeRegistry = resolveRuntimeRegistry(deps);
+        const defaultRuntime = deps.adapter?.id ?? DEFAULT_RUNTIME;
         const verifyCommands = (parsed.options.verify ?? []).map(parseVerifyCommand);
+        const workerTarget = buildTarget(
+          parsed.options.runtime?.at(-1) ?? defaultRuntime,
+          parsed.options.model?.at(-1),
+        );
+        const criticRuntime = parsed.options["critic-runtime"]?.at(-1);
+        const criticModel = parsed.options["critic-model"]?.at(-1);
+        const criticTarget =
+          criticRuntime !== undefined || criticModel !== undefined
+            ? buildTarget(criticRuntime ?? workerTarget.runtime, criticModel)
+            : undefined;
+        const workerReasoningEffort = parseReasoningEffort(parsed.options.effort?.at(-1));
+        const criticReasoningEffort = parseReasoningEffort(parsed.options["critic-effort"]?.at(-1));
         const runOptions = {
           brief,
           workflow,
+          workerTarget,
+          ...(workerReasoningEffort !== undefined ? { workerReasoningEffort } : {}),
+          ...(criticTarget !== undefined ? { criticTarget } : {}),
+          ...(criticReasoningEffort !== undefined ? { criticReasoningEffort } : {}),
           repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
           verifyCommands,
           timeoutMinutes,
           cleanup: parsed.flags.has("cleanup"),
-          ...(model !== undefined ? { model } : {}),
           // correction only makes sense with something to correct against
           correct: verifyCommands.length > 0 && !parsed.flags.has("no-correct"),
         };
@@ -108,7 +161,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           !parsed.flags.has("plain") && deps.out === undefined && process.stdout.isTTY === true;
         if (useTui) {
           const { runWithTui } = await import("./ui/tui.js");
-          return await runWithTui(runOptions, { adapter });
+          return await runWithTui(runOptions, { runtimeRegistry });
         }
 
         // Plain mode: first Ctrl-C cancels the run gracefully through the
@@ -122,7 +175,11 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         };
         process.on("SIGINT", onSigint);
         try {
-          const result = await runTask(runOptions, { adapter, out, signal: controller.signal });
+          const result = await runTask(runOptions, {
+            runtimeRegistry,
+            out,
+            signal: controller.signal,
+          });
           return result.exitCode;
         } finally {
           process.removeListener("SIGINT", onSigint);
@@ -162,8 +219,13 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         return await statusCommand(parsed.options.repo?.at(-1) ?? process.cwd(), out);
       }
       case "doctor": {
-        parseArgs(rest, { valueOptions: [], flags: ["help"] });
-        const adapter = deps.adapter ?? new CodexAdapter();
+        const parsed = parseArgs(rest, { valueOptions: ["runtime"], flags: ["help"] });
+        const runtime = parsed.options.runtime?.at(-1) ?? deps.adapter?.id ?? DEFAULT_RUNTIME;
+        const adapter = resolveRuntimeRegistry(deps).get(runtime);
+        if (!adapter) {
+          out(`error: unknown agent runtime "${runtime}"\n`);
+          return 2;
+        }
         return await doctorCommand(adapter, out);
       }
       case "help":
@@ -192,6 +254,20 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
     out(`error: ${(error as Error).message}\n`);
     return 1;
   }
+}
+
+function resolveRuntimeRegistry(deps: CliDeps): RuntimeRegistry {
+  if (deps.runtimeRegistry !== undefined) {
+    return deps.runtimeRegistry;
+  }
+  if (deps.adapter !== undefined) {
+    return new StaticRuntimeRegistry([deps.adapter]);
+  }
+  return new StaticRuntimeRegistry([new CodexAdapter(), new ClaudeAdapter()]);
+}
+
+function buildTarget(runtime: string, model: string | undefined): ExecutionTarget {
+  return model === undefined ? { runtime } : { runtime, model };
 }
 
 /**
@@ -223,6 +299,18 @@ function parseTimeout(raw: string | undefined): number {
     throw new UsageError(`invalid --timeout value: "${raw}" (expected positive minutes)`);
   }
   return minutes;
+}
+
+function parseReasoningEffort(raw: string | undefined): ReasoningEffort | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if ((REASONING_EFFORTS as readonly string[]).includes(raw)) {
+    return raw as ReasoningEffort;
+  }
+  throw new UsageError(
+    `invalid reasoning effort "${raw}" (expected: ${REASONING_EFFORTS.join(", ")})`,
+  );
 }
 
 function parseVerifyCommand(raw: string): VerificationCommand {

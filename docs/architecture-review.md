@@ -90,7 +90,7 @@ strict dependency direction enforced by convention:
   vocabulary exists (`src/core/workflow.ts`) and names the future coordinator
   role `driver`, but no Driver invocation is produced yet;
   `docs/brief-workflow-design.md` §8 specifies the next slice.
-- Additional agent adapters (claude-code, opencode, …); only codex exists.
+- Additional agent adapters beyond Codex and Claude Code (opencode, …).
 - Landing changes (committing/merging a run's worktree diff to the user's branch).
 - Configuration file (`conjunction.toml` or similar) — verification commands are
   CLI flags for now.
@@ -274,10 +274,9 @@ in the architecture:
   file-sourced brief is announced as `## Brief (<path>)` instead of being nested
   under `## Objective`, so the brief's own headings don't collide.
 
-Deliberately NOT built (specified in the design doc instead): runtime registry,
-second adapter selection, `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/
-`DriverDecision`, a `WorkflowExecutor` extraction, a workflow DSL, and the
-Driver itself.
+Deliberately NOT built (specified in the design doc instead): intelligent
+routing, `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/`DriverDecision`, a
+`WorkflowExecutor` extraction, a workflow DSL, and the Driver itself.
 
 ## V1 Lot 1 — execution model harness
 
@@ -304,6 +303,31 @@ explicit invocations:
   suite covers structured process outcome, cancellation, timeout, streaming,
   read-only mode, instruction transmission, no pass/fail decision, and no
   Git/worktree lifecycle knowledge; Codex passes it through a fake spawner.
+
+## V1 Lot 2 — multi-runtime execution
+
+This pass keeps the same serial workflow, but invocation targets are now real:
+
+- **RuntimeRegistry:** core defines the tiny `RuntimeRegistry` port and
+  `StaticRuntimeRegistry` implementation (`runtime id -> AgentAdapter`). The
+  CLI wires concrete adapters; core never imports Codex or Claude.
+- **Target resolution:** `runTask` selects explicit worker and critic targets
+  from CLI options. `Orchestrator` creates each `Invocation` with its target and
+  resolves the adapter from `invocation.target.runtime` immediately before
+  calling `run()`. Correction inherits the initial worker invocation target;
+  critic may use a distinct target.
+- **Events:** `agent.started`, `agent.output`, and `agent.completed` all carry
+  `invocationId`, so stdout/stderr chunks are attributable even when multiple
+  runtimes participate in one run.
+- **Adapters:** Codex now reads `input.target.model`; it no longer carries model
+  in the constructor. Claude Code was added as the second concrete adapter using
+  installed/official CLI flags (`claude -p`, `--model`, `--effort`,
+  `--permission-mode`, `--tools`, `--json-schema`).
+- **Capabilities:** adapters expose `AgentCapabilities`. Codex supports
+  read-only and structured output but declares no reasoning-effort mapping.
+  Claude supports read-only, structured output, and maps Conjunction
+  `low|medium|high|maximum` to Claude `low|medium|high|max`; `minimal` is not
+  mapped.
 
 `examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
 identical input. Conjunction does not build that application.

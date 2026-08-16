@@ -4,6 +4,7 @@ import {
   Orchestrator,
   RunNotExecutableError,
   REVIEW_OUTPUT_SCHEMA,
+  StaticRuntimeRegistry,
   type AgentAdapter,
   type AgentRunInput,
   type VerificationOutcome,
@@ -34,6 +35,7 @@ function scriptedAgent(
     inputs,
     adapter: {
       id: "stub-agent",
+      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
       detect: () => Promise.resolve({ available: true }),
       run: (input) => {
         inputs.push(input);
@@ -46,6 +48,41 @@ function scriptedAgent(
         return Promise.resolve(
           result.lastMessage !== undefined ? { ...out, lastMessage: result.lastMessage } : out,
         );
+      },
+    },
+  };
+}
+
+function recordingAgent(
+  id: string,
+  output: { chunk: string; stream: "stdout" | "stderr" },
+): {
+  adapter: AgentAdapter;
+  inputs: AgentRunInput[];
+} {
+  const inputs: AgentRunInput[] = [];
+  return {
+    inputs,
+    adapter: {
+      id,
+      capabilities: () => ({
+        readOnly: true,
+        structuredOutput: true,
+        reasoningEffort: ["low", "medium", "high", "maximum"],
+      }),
+      detect: () => Promise.resolve({ available: true }),
+      run: (input) => {
+        inputs.push(input);
+        input.onOutput?.(output.chunk, output.stream);
+        return Promise.resolve({
+          exitCode: 0,
+          timedOut: false,
+          aborted: false,
+          lastMessage:
+            input.readOnly === true
+              ? JSON.stringify({ summary: "critic ok", findings: [] })
+              : "worker ok",
+        });
       },
     },
   };
@@ -83,7 +120,13 @@ const FINDINGS_JSON = JSON.stringify({
 const PACKET = "reviewer packet: objective + diff + verify summary";
 
 function makeOrchestrator(agent: AgentAdapter, verification: VerificationRunner) {
-  return new Orchestrator({ createId, now, workspace: stubWorkspace, agent, verification });
+  return new Orchestrator({
+    createId,
+    now,
+    workspace: stubWorkspace,
+    runtimeRegistry: new StaticRuntimeRegistry([agent]),
+    verification,
+  });
 }
 
 async function runningRun(orchestrator: Orchestrator) {
@@ -149,6 +192,64 @@ describe("Orchestrator review (lot 7)", () => {
       "agent.completed",
       "review.completed",
       "run.completed",
+    ]);
+  });
+
+  it("resolves worker and critic invocations to distinct runtime targets", async () => {
+    const worker = recordingAgent("runtime-a", { chunk: "worker out\n", stream: "stdout" });
+    const critic = recordingAgent("runtime-b", { chunk: "critic err\n", stream: "stderr" });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([worker.adapter, critic.adapter]),
+      verification: scriptedVerification([PASS]),
+    });
+    const task = orchestrator.createTask({ title: "t", objective: "do the thing" });
+    const run = orchestrator.createRun(
+      task.id,
+      { runtime: "runtime-a", model: "worker-model" },
+      "review",
+    );
+    await orchestrator.startRun(run.id);
+
+    await orchestrator.executeRun(run.id, {
+      timeoutMs: 1_000,
+      reasoningEffort: "high",
+    });
+    await orchestrator.verifyRun(run.id, { review: true });
+    await orchestrator.reviewRun(run.id, PACKET, {
+      timeoutMs: 1_000,
+      target: { runtime: "runtime-b", model: "critic-model" },
+      reasoningEffort: "maximum",
+    });
+
+    expect(worker.inputs).toHaveLength(1);
+    expect(critic.inputs).toHaveLength(1);
+    expect(worker.inputs[0]?.target).toEqual({ runtime: "runtime-a", model: "worker-model" });
+    expect(worker.inputs[0]?.reasoningEffort).toBe("high");
+    expect(critic.inputs[0]?.target).toEqual({ runtime: "runtime-b", model: "critic-model" });
+    expect(critic.inputs[0]?.reasoningEffort).toBe("maximum");
+    expect(critic.inputs[0]?.readOnly).toBe(true);
+
+    expect(run.invocations).toHaveLength(2);
+    expect(run.invocations?.[0]).toMatchObject({
+      role: "worker",
+      target: { runtime: "runtime-a", model: "worker-model" },
+      reasoningEffort: "high",
+    });
+    expect(run.invocations?.[1]).toMatchObject({
+      role: "critic",
+      target: { runtime: "runtime-b", model: "critic-model" },
+      reasoningEffort: "maximum",
+      readOnly: true,
+    });
+
+    const [workerInvocation, criticInvocation] = run.invocations ?? [];
+    const outputs = orchestrator.events.ofType("agent.output");
+    expect(outputs.map((event) => event.payload)).toEqual([
+      { invocationId: workerInvocation?.id, stream: "stdout", chunk: "worker out\n" },
+      { invocationId: criticInvocation?.id, stream: "stderr", chunk: "critic err\n" },
     ]);
   });
 

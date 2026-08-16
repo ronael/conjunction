@@ -28,10 +28,12 @@ export interface AgentAdapterContractHarness {
     lastProcess(): ContractProcess;
   };
   promptFromCall(call: ContractCall): string | undefined;
-  sandboxFromCall(call: ContractCall): string | undefined;
+  assertReadOnlyTransport(call: ContractCall): void;
 }
 
 const BASE_INPUT = {
+  target: { runtime: "contract-runtime", model: "contract-model" },
+  reasoningEffort: "medium" as const,
   instructions: "CONTRACT INSTRUCTIONS: change only the requested file",
   workspacePath: "/tmp/conjunction-contract-dir",
   timeoutMs: 1_000,
@@ -42,6 +44,14 @@ export function describeAgentAdapterContract(
   harness: AgentAdapterContractHarness,
 ): void {
   describe(`${name} AgentAdapter contract`, () => {
+    it("declares capabilities explicitly", () => {
+      const subject = harness.makeSubject({ behavior: (child) => child.exit(0) });
+      const capabilities = subject.adapter.capabilities();
+      expect(typeof capabilities.readOnly).toBe("boolean");
+      expect(typeof capabilities.structuredOutput).toBe("boolean");
+      expect(Array.isArray(capabilities.reasoningEffort)).toBe(true);
+    });
+
     it("returns structured process outcome without pass/fail judgment", async () => {
       const subject = harness.makeSubject({ behavior: (child) => child.exit(7) });
       const result = await subject.adapter.run(BASE_INPUT);
@@ -120,7 +130,9 @@ export function describeAgentAdapterContract(
 
       const call = subject.calls[0];
       expect(call).toBeDefined();
-      expect(call === undefined ? undefined : harness.sandboxFromCall(call)).toBe("read-only");
+      if (call !== undefined) {
+        harness.assertReadOnlyTransport(call);
+      }
     });
 
     it("has no branch, cleanup, or Git lifecycle knowledge in its transport", async () => {

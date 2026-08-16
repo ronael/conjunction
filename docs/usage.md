@@ -8,18 +8,22 @@ pnpm build
 node dist/cli/main.js --help        # or link the bin: pnpm link --global
 ```
 
-Requires: node >= 20, git, and the [Codex CLI](https://github.com/openai/codex)
-installed and authenticated (`codex --version` should work).
+Requires: node >= 20, git, and at least one supported agent runtime. The default
+runtime is the [Codex CLI](https://github.com/openai/codex), installed and
+authenticated (`codex --version` should work). Claude Code is also supported as
+`claude-code` when `claude --version` works.
 
 ## Commands
 
 ### `conjunction doctor`
 
-Checks that the agent runtime is installed and usable:
+Checks that an agent runtime is installed and usable:
 
 ```bash
 $ node dist/cli/main.js doctor
 agent runtime "codex-cli": available (codex-cli 0.144.1)
+$ node dist/cli/main.js doctor --runtime claude-code
+agent runtime "claude-code": available (2.1.220 (Claude Code))
 ```
 
 ### `conjunction run "<task>" | <brief.md> | --brief <file>`
@@ -29,8 +33,7 @@ Executes one brief end-to-end:
 1. builds a `Task` from the brief (inline description or file);
 2. creates branch `conjunction/<runId>` and a worktree at
    `<repoRoot>/.conjunction/worktrees/<runId>`;
-3. runs the codex agent sandboxed (`workspace-write`) inside the worktree,
-   streaming its output;
+3. runs the selected worker runtime inside the worktree, streaming its output;
 4. runs each `--verify` command (sequentially, fail-fast) inside the worktree;
 5. prints a summary and preserves the worktree for inspection.
 
@@ -117,7 +120,14 @@ Options:
   worktree. Splits on whitespace; quote the whole command, not its arguments.
 - `--timeout <minutes>` — agent timeout (default: 10). On timeout the whole
   agent process group is killed.
-- `--model <model>` — passed through as `codex exec -m <model>`.
+- `--runtime <id>` — worker runtime (`codex-cli` by default).
+- `--model <model>` — worker model, recorded on the worker
+  `ExecutionTarget` and mapped by that runtime's adapter.
+- `--effort <minimal|low|medium|high|maximum>` — explicit worker reasoning
+  effort intent. It is accepted only when the selected runtime declares support.
+- `--critic-runtime <id>` / `--critic-model <model>` /
+  `--critic-effort <level>` — independent critic target; defaults to the worker
+  target unless set.
 - `--cleanup` — attempt to remove the worktree+branch after the run. Removal
   is refused (and the worktree preserved) when it has uncommitted changes.
 - `--plain` — force plain text output (no TUI), same as piping/CI behavior.

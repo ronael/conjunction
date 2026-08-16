@@ -1,3 +1,5 @@
+import type { ExecutionTarget, ReasoningEffort } from "./invocation.js";
+
 export interface AgentAvailability {
   available: boolean;
   /** Runtime version string when detectable, e.g. "codex-cli 0.144.1". */
@@ -6,7 +8,20 @@ export interface AgentAvailability {
   reason?: string;
 }
 
+export interface AgentCapabilities {
+  /** Adapter can enforce a read-only invocation mode. */
+  readOnly: boolean;
+  /** Adapter can request structured final output from the runtime. */
+  structuredOutput: boolean;
+  /** Conjunction reasoning-effort intentions this runtime can map truthfully. */
+  reasoningEffort: readonly ReasoningEffort[];
+}
+
 export interface AgentRunInput {
+  /** Target selected for this specific invocation. */
+  target: ExecutionTarget;
+  /** Portable Conjunction reasoning-effort intent for this invocation. */
+  reasoningEffort: ReasoningEffort;
   /** Semantic instructions prepared by Conjunction before the adapter boundary. */
   instructions: string;
   /** The run's isolated worktree; the only filesystem the agent may touch. */
@@ -56,8 +71,33 @@ export interface AgentRunResult {
 export interface AgentAdapter {
   /** Stable runtime id recorded on Run.runtime, e.g. "codex-cli". */
   readonly id: string;
+  /** Runtime capabilities Conjunction may rely on without guessing. */
+  capabilities(): AgentCapabilities;
   /** Cheap, side-effect-free check that the runtime is installed and usable. */
   detect(): Promise<AgentAvailability>;
   /** Runs one bounded, non-interactive attempt in the run's worktree. */
   run(input: AgentRunInput): Promise<AgentRunResult>;
+}
+
+export interface RuntimeRegistry {
+  get(runtime: string): AgentAdapter | undefined;
+  ids(): readonly string[];
+}
+
+export class StaticRuntimeRegistry implements RuntimeRegistry {
+  #adapters = new Map<string, AgentAdapter>();
+
+  constructor(adapters: readonly AgentAdapter[]) {
+    for (const adapter of adapters) {
+      this.#adapters.set(adapter.id, adapter);
+    }
+  }
+
+  get(runtime: string): AgentAdapter | undefined {
+    return this.#adapters.get(runtime);
+  }
+
+  ids(): readonly string[] {
+    return [...this.#adapters.keys()].sort();
+  }
 }

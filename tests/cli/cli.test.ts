@@ -4,7 +4,12 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { AgentAdapter, AgentRunInput, AgentRunResult } from "../../src/core/index.js";
+import {
+  StaticRuntimeRegistry,
+  type AgentAdapter,
+  type AgentRunInput,
+  type AgentRunResult,
+} from "../../src/core/index.js";
 import { cli } from "../../src/cli/cli.js";
 import { inlineBrief } from "../../src/cli/brief.js";
 import { runTask } from "../../src/cli/run-command.js";
@@ -32,9 +37,23 @@ interface StubBehavior {
   (input: AgentRunInput): Promise<Partial<AgentRunResult>>;
 }
 
-function stubAdapter(behavior: StubBehavior): AgentAdapter {
+function stubAdapter(
+  behavior: StubBehavior,
+  options: { id?: string; reasoningEffort?: readonly string[] } = {},
+): AgentAdapter {
   return {
-    id: "stub-agent",
+    id: options.id ?? "stub-agent",
+    capabilities: () => ({
+      readOnly: true,
+      structuredOutput: true,
+      reasoningEffort: (options.reasoningEffort ?? [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "maximum",
+      ]) as ReturnType<AgentAdapter["capabilities"]>["reasoningEffort"],
+    }),
     detect: () => Promise.resolve({ available: true, version: "stub 1.0" }),
     run: async (input) => ({
       exitCode: 0,
@@ -43,6 +62,14 @@ function stubAdapter(behavior: StubBehavior): AgentAdapter {
       ...(await behavior(input)),
     }),
   };
+}
+
+function registry(adapter: AgentAdapter = fileCreatingStub) {
+  return new StaticRuntimeRegistry([adapter]);
+}
+
+function workerTarget(runtime = "stub-agent") {
+  return { runtime };
 }
 
 /** Stub that acts like a real agent: creates hello.txt inside the worktree. */
@@ -435,13 +462,14 @@ describe("cli run (stub adapter, real git repo)", () => {
       {
         brief: inlineBrief("wait forever"),
         workflow: "single" as const,
+        workerTarget: workerTarget(),
         repoPath: repo,
         verifyCommands: [],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
       },
-      { adapter: waitingStub, out: io.out, signal: controller.signal },
+      { runtimeRegistry: registry(waitingStub), out: io.out, signal: controller.signal },
     );
     await new Promise((resolve) => setTimeout(resolve, 300));
     controller.abort();
@@ -473,13 +501,14 @@ describe("cli run — audit error paths", () => {
       {
         brief: inlineBrief("never starts"),
         workflow: "single" as const,
+        workerTarget: workerTarget(),
         repoPath: repo,
         verifyCommands: [],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
       },
-      { adapter: countingStub, out: io.out, signal: controller.signal },
+      { runtimeRegistry: registry(countingStub), out: io.out, signal: controller.signal },
     );
     expect(result.exitCode).toBe(1);
     expect(result.run?.state).toBe("cancelled");
@@ -500,13 +529,14 @@ describe("cli run — audit error paths", () => {
       {
         brief: inlineBrief("verify gets cancelled"),
         workflow: "single" as const,
+        workerTarget: workerTarget(),
         repoPath: repo,
         verifyCommands: [slowVerify],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
       },
-      { adapter: fileCreatingStub, out: io.out, signal: controller.signal },
+      { runtimeRegistry: registry(fileCreatingStub), out: io.out, signal: controller.signal },
     );
     await new Promise((resolve) => setTimeout(resolve, 600)); // let verification start
     controller.abort();
@@ -602,6 +632,134 @@ describe("cli run — audit error paths", () => {
     expect(types.indexOf("correction.completed")).toBeLessThan(types.indexOf("review.started"));
     expect(types.indexOf("review.completed")).toBeLessThan(types.indexOf("run.completed"));
     expect(types.at(-1)).toBe("run.completed");
+  });
+
+  it("lot 2: worker and critic can use distinct runtime targets without mixed output", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const workerInputs: AgentRunInput[] = [];
+    const criticInputs: AgentRunInput[] = [];
+    const worker = stubAdapter(
+      async (input) => {
+        workerInputs.push(input);
+        input.onOutput?.("worker stdout\n", "stdout");
+        await writeFile(path.join(input.workspacePath, "good.txt"), "ok\n");
+        return { lastMessage: "worker done" };
+      },
+      { id: "runtime-a", reasoningEffort: ["high"] },
+    );
+    const critic = stubAdapter(
+      async (input) => {
+        criticInputs.push(input);
+        input.onOutput?.("critic stderr\n", "stderr");
+        return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
+      },
+      { id: "runtime-b", reasoningEffort: ["maximum"] },
+    );
+
+    const code = await cli(
+      [
+        "run",
+        "create good.txt",
+        "--repo",
+        repo,
+        "--workflow",
+        "review",
+        "--runtime",
+        "runtime-a",
+        "--model",
+        "worker-model",
+        "--effort",
+        "high",
+        "--critic-runtime",
+        "runtime-b",
+        "--critic-model",
+        "critic-model",
+        "--critic-effort",
+        "maximum",
+        "--plain",
+      ],
+      { runtimeRegistry: new StaticRuntimeRegistry([worker, critic]), out: io.out },
+    );
+
+    expect(code).toBe(0);
+    expect(workerInputs).toHaveLength(1);
+    expect(criticInputs).toHaveLength(1);
+    expect(workerInputs[0]?.target).toEqual({ runtime: "runtime-a", model: "worker-model" });
+    expect(workerInputs[0]?.reasoningEffort).toBe("high");
+    expect(criticInputs[0]?.target).toEqual({ runtime: "runtime-b", model: "critic-model" });
+    expect(criticInputs[0]?.reasoningEffort).toBe("maximum");
+    expect(criticInputs[0]?.readOnly).toBe(true);
+
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as {
+      run: {
+        invocations?: {
+          id: string;
+          role: string;
+          target: { runtime: string; model?: string };
+          reasoningEffort: string;
+          readOnly?: boolean;
+        }[];
+      };
+    };
+    expect(stored.run.invocations).toMatchObject([
+      {
+        role: "worker",
+        target: { runtime: "runtime-a", model: "worker-model" },
+        reasoningEffort: "high",
+      },
+      {
+        role: "critic",
+        target: { runtime: "runtime-b", model: "critic-model" },
+        reasoningEffort: "maximum",
+        readOnly: true,
+      },
+    ]);
+
+    const events = (
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+    const outputEvents = events.filter((event) => event.type === "agent.output");
+    expect(outputEvents.map((event) => event.payload)).toEqual([
+      {
+        invocationId: stored.run.invocations?.[0]?.id,
+        stream: "stdout",
+        chunk: "worker stdout\n",
+      },
+      {
+        invocationId: stored.run.invocations?.[1]?.id,
+        stream: "stderr",
+        chunk: "critic stderr\n",
+      },
+    ]);
+  });
+
+  it("lot 2: explicit unsupported reasoning effort fails before invoking the runtime", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    let calls = 0;
+    const worker = stubAdapter(
+      async () => {
+        calls++;
+        return {};
+      },
+      { id: "runtime-a", reasoningEffort: ["high"] },
+    );
+
+    const code = await cli(
+      ["run", "create good.txt", "--repo", repo, "--runtime", "runtime-a", "--effort", "low"],
+      { runtimeRegistry: new StaticRuntimeRegistry([worker]), out: io.out },
+    );
+
+    expect(code).toBe(2);
+    expect(calls).toBe(0);
+    expect(io.text()).toContain('does not support reasoning effort "low"');
   });
 });
 
@@ -1171,6 +1329,7 @@ describe("cli status / doctor / usage", () => {
 
     const down: AgentAdapter = {
       id: "stub-agent",
+      capabilities: () => ({ readOnly: true, structuredOutput: true, reasoningEffort: [] }),
       detect: () => Promise.resolve({ available: false, reason: "not installed" }),
       run: () => Promise.reject(new Error("should not run")),
     };
