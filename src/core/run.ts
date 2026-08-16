@@ -1,4 +1,5 @@
 import type { ReviewFinding } from "./review.js";
+import type { DriverDecisionRecord, DriverRunConfig } from "./driver.js";
 import type { ExecutionTarget, Invocation } from "./invocation.js";
 import type { WorkflowName } from "./workflow.js";
 
@@ -9,7 +10,7 @@ import type { WorkflowName } from "./workflow.js";
  *
  *   pending    -> running | cancelled
  *   running    -> verifying | failed | cancelled
- *   verifying  -> completed | failed | correcting | reviewing | cancelled
+ *   verifying  -> running | completed | failed | correcting | reviewing | cancelled
  *   correcting -> verifying | failed | cancelled
  *   reviewing  -> completed | cancelled
  *   completed / failed / cancelled are terminal.
@@ -40,7 +41,7 @@ export type RunState =
 const ALLOWED_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed", "correcting", "reviewing", "cancelled"],
+  verifying: ["running", "completed", "failed", "correcting", "reviewing", "cancelled"],
   correcting: ["verifying", "failed", "cancelled"],
   reviewing: ["completed", "cancelled"],
   completed: [],
@@ -90,6 +91,17 @@ export interface VerificationOutcome {
     exitCode: number | null;
     timedOut: boolean;
   }[];
+}
+
+/** One deterministic verification checkpoint. `verificationResult` remains the latest one. */
+export interface VerificationRecord {
+  readonly id: string;
+  startedAt: string;
+  completedAt: string;
+  /** Last writable invocation whose work this verification checked, if any. */
+  afterInvocationId?: string;
+  outcome: VerificationOutcome;
+  failureSignature: string;
 }
 
 export interface RunResult {
@@ -169,6 +181,12 @@ export interface Run {
   state: RunState;
   /** Explicit record of every agent execution in this run. */
   invocations?: Invocation[];
+  /** Structured Driver decisions, each linked to the Driver invocation that produced it. */
+  driverDecisions?: DriverDecisionRecord[];
+  /** Ordered deterministic verification history for dynamic workflows. */
+  verificationHistory?: VerificationRecord[];
+  /** Configuration/snapshot for the dynamic Driver workflow. */
+  quality?: DriverRunConfig;
   attempts: Attempt[];
   result?: RunResult;
   verificationResult?: VerificationOutcome;
@@ -191,7 +209,7 @@ export interface Run {
 export function transitionRun(run: Run, to: RunState, at: string): void {
   assertTransition(run.state, to);
   run.state = to;
-  if (to === "running") {
+  if (to === "running" && run.startedAt === undefined) {
     run.startedAt = at;
   }
   if (to === "completed" || to === "failed" || to === "cancelled") {

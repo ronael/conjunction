@@ -48,6 +48,11 @@ conjunction run "create a file hello.txt containing the text hello conjunction" 
 # brief file
 conjunction run examples/chessquest/brief.md --workflow single
 conjunction run examples/chessquest/brief.md --workflow review
+conjunction run examples/chessquest/brief.md --workflow quality \
+  --driver-runtime claude-code \
+  --runtime codex-cli \
+  --critic-runtime claude-code \
+  --verify "pnpm test"
 
 # explicit form (never guesses)
 conjunction run --brief ./briefs/chessquest.md --workflow review
@@ -86,13 +91,13 @@ brief support have no `task.source` and keep working.
 
 ## Workflows
 
-`--workflow` names which participants take part in a run. It adds no new
-capability — it names combinations that already existed as flags.
+`--workflow` names which participants take part in a run.
 
-| Workflow           | Roles          | Pipeline                                                                    |
-| ------------------ | -------------- | --------------------------------------------------------------------------- |
-| `single` (default) | worker         | worker → verification → (bounded correction)                                |
-| `review`           | worker, critic | worker → verification → (bounded correction) → independent read-only critic |
+| Workflow           | Roles                  | Pipeline                                                                    |
+| ------------------ | ---------------------- | --------------------------------------------------------------------------- |
+| `single` (default) | worker                 | worker → verification → (bounded correction)                                |
+| `review`           | worker, critic         | worker → verification → (bounded correction) → independent read-only critic |
+| `quality`          | driver, worker, critic | dynamic Driver loop → final verification → independent read-only critic     |
 
 - `--review` is kept as an alias for `--workflow review`. Contradicting the two
   (`--workflow single --review`) is an error, not a silent winner.
@@ -100,6 +105,10 @@ capability — it names combinations that already existed as flags.
 - **Correction is part of every workflow.** It is the same worker responding to
   deterministic feedback, not a separate role, so `--no-correct` is an
   orthogonal modifier rather than a workflow of its own.
+- `quality` uses a read-only Driver invocation with structured output. The
+  Driver chooses from an explicit worker target pool, can request verification,
+  and can accept only after mandatory verification is fresh and green. It
+  requires at least one `--verify` command and currently renders in plain mode.
 
 `run.workflow` is recorded in the run JSON so two workflows can be compared on
 the same brief:
@@ -107,13 +116,14 @@ the same brief:
 ```bash
 conjunction run examples/chessquest/brief.md --workflow single
 conjunction run examples/chessquest/brief.md --workflow review
+conjunction run examples/chessquest/brief.md --workflow quality --verify "pnpm test"
 conjunction status   # both runs, with their workflow and brief
 ```
 
 Options:
 
 - `--brief <file>` — read the brief from a file (explicit form).
-- `--workflow <single|review>` — which participants take part (default:
+- `--workflow <single|review|quality>` — which participants take part (default:
   `single`).
 - `--repo <path>` — any path inside the target git repo (default: cwd).
 - `--verify "<cmd> [args...]"` — repeatable deterministic check, run in the
@@ -125,6 +135,13 @@ Options:
   `ExecutionTarget` and mapped by that runtime's adapter.
 - `--effort <minimal|low|medium|high|maximum>` — explicit worker reasoning
   effort intent. It is accepted only when the selected runtime declares support.
+- `--driver-runtime <id>` / `--driver-model <model>` /
+  `--driver-effort <level>` — Driver target for `quality`; defaults to the
+  worker target unless set. Driver invocations are always read-only and require
+  structured output support.
+- `--worker-target <id=runtime>` — repeatable extra worker target for
+  `quality`. Without this, the Driver receives one target with id `worker`
+  using `--runtime`/`--model`.
 - `--critic-runtime <id>` / `--critic-model <model>` /
   `--critic-effort <level>` — independent critic target; defaults to the worker
   target unless set.
@@ -162,6 +179,32 @@ Both attempts are recorded on the run (`attempts` for compatibility and
 `── correction (attempt 2/2) ──`; the TUI adds a `Correction (attempt 2)`
 checklist step. `--no-correct` disables the loop; without `--verify` there is
 nothing to correct against and no correction happens.
+
+## Quality Driver Workflow
+
+`--workflow quality` is sequential and bounded. The Driver itself is a normal
+agent invocation:
+
+- role: `driver`;
+- read-only: always true;
+- structured output: required;
+- target: `--driver-runtime` / `--driver-model`, defaulting to the worker
+  target.
+
+The Driver returns one structured decision at a time:
+
+- `delegate` — run one writable worker against an allowed worker target;
+- `verify` — run the configured deterministic checks as a non-terminal
+  checkpoint;
+- `accept` — allowed only when the latest verification is green and fresh after
+  the latest writable worker invocation;
+- `stop` — fail the run with the Driver's reason.
+
+Retry, target switch, and effort escalation are all represented as another
+`delegate` decision. There is no parallelism and no generic workflow DSL. The
+V1 caps are deterministic: max 8 Driver decisions and max 4 writable worker
+invocations. Driver decisions are stored in `run.driverDecisions[]`; verification
+checkpoints are stored in `run.verificationHistory[]`.
 
 ## Interactive TUI
 

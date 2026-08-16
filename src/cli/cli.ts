@@ -20,6 +20,7 @@ import { parseArgs, UsageError } from "./args.js";
 import { BriefError, resolveBrief } from "./brief.js";
 import { doctorCommand } from "./doctor-command.js";
 import { runTask } from "./run-command.js";
+import type { WorkerTargetInput } from "./run-command.js";
 import { statusCommand } from "./status-command.js";
 
 const DEFAULT_TIMEOUT_MINUTES = 10;
@@ -39,6 +40,9 @@ usage:
                            [--workflow ${WORKFLOW_NAMES.join("|")}]
                            [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--runtime <id>] [--model <model>] [--effort <level>]
+                           [--driver-runtime <id>] [--driver-model <model>]
+                           [--driver-effort <level>]
+                           [--worker-target <id=runtime>]...
                            [--critic-runtime <id>] [--critic-model <model>]
                            [--critic-effort <level>]
                            [--timeout <minutes>] [--cleanup]
@@ -68,6 +72,9 @@ notes:
   --review is an alias for --workflow review (independent READ-ONLY critic
   after verification passes); findings are advisory and never change the exit code.
   --runtime defaults to ${DEFAULT_RUNTIME}; --critic-runtime defaults to the worker runtime.
+  quality workflow: --driver-runtime defaults to the worker runtime; worker
+  target pool defaults to id "worker" for --runtime, or repeated
+  --worker-target id=runtime entries.
   reasoning effort values: ${REASONING_EFFORTS.join("|")}.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
@@ -101,6 +108,10 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
             "brief",
             "workflow",
             "runtime",
+            "driver-runtime",
+            "driver-model",
+            "driver-effort",
+            "worker-target",
             "critic-runtime",
             "critic-model",
             "effort",
@@ -138,13 +149,27 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           criticRuntime !== undefined || criticModel !== undefined
             ? buildTarget(criticRuntime ?? workerTarget.runtime, criticModel)
             : undefined;
+        const driverRuntime = parsed.options["driver-runtime"]?.at(-1);
+        const driverModel = parsed.options["driver-model"]?.at(-1);
+        const driverTarget =
+          driverRuntime !== undefined || driverModel !== undefined
+            ? buildTarget(driverRuntime ?? workerTarget.runtime, driverModel)
+            : undefined;
+        const workerTargets =
+          parsed.options["worker-target"] !== undefined
+            ? parsed.options["worker-target"].map(parseWorkerTarget)
+            : undefined;
         const workerReasoningEffort = parseReasoningEffort(parsed.options.effort?.at(-1));
+        const driverReasoningEffort = parseReasoningEffort(parsed.options["driver-effort"]?.at(-1));
         const criticReasoningEffort = parseReasoningEffort(parsed.options["critic-effort"]?.at(-1));
         const runOptions = {
           brief,
           workflow,
           workerTarget,
           ...(workerReasoningEffort !== undefined ? { workerReasoningEffort } : {}),
+          ...(workerTargets !== undefined ? { workerTargets } : {}),
+          ...(driverTarget !== undefined ? { driverTarget } : {}),
+          ...(driverReasoningEffort !== undefined ? { driverReasoningEffort } : {}),
           ...(criticTarget !== undefined ? { criticTarget } : {}),
           ...(criticReasoningEffort !== undefined ? { criticReasoningEffort } : {}),
           repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
@@ -158,7 +183,10 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         // The TUI only takes over a real terminal the user is watching; tests
         // (injected `out`), pipes and CI get the plain output, as does --plain.
         const useTui =
-          !parsed.flags.has("plain") && deps.out === undefined && process.stdout.isTTY === true;
+          workflow !== "quality" &&
+          !parsed.flags.has("plain") &&
+          deps.out === undefined &&
+          process.stdout.isTTY === true;
         if (useTui) {
           const { runWithTui } = await import("./ui/tui.js");
           return await runWithTui(runOptions, { runtimeRegistry });
@@ -311,6 +339,19 @@ function parseReasoningEffort(raw: string | undefined): ReasoningEffort | undefi
   throw new UsageError(
     `invalid reasoning effort "${raw}" (expected: ${REASONING_EFFORTS.join(", ")})`,
   );
+}
+
+function parseWorkerTarget(raw: string): WorkerTargetInput {
+  const separator = raw.indexOf("=");
+  if (separator <= 0 || separator === raw.length - 1) {
+    throw new UsageError(`invalid --worker-target "${raw}" (expected id=runtime)`);
+  }
+  const id = raw.slice(0, separator).trim();
+  const runtime = raw.slice(separator + 1).trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new UsageError(`invalid worker target id "${id}"`);
+  }
+  return { id, target: { runtime } };
 }
 
 function parseVerifyCommand(raw: string): VerificationCommand {

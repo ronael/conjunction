@@ -315,14 +315,15 @@ export interface WorkflowDefinition {
 }
 ```
 
-| Workflow           | Roles              | Pipeline                                                                 |
-| ------------------ | ------------------ | ------------------------------------------------------------------------ |
-| `single` (default) | `worker`           | worker → verification → (bounded correction) → land                      |
-| `review`           | `worker`, `critic` | worker → verification → (bounded correction) → independent critic → land |
+| Workflow           | Roles                        | Pipeline                                                                 |
+| ------------------ | ---------------------------- | ------------------------------------------------------------------------ |
+| `single` (default) | `worker`                     | worker → verification → (bounded correction) → land                      |
+| `review`           | `worker`, `critic`           | worker → verification → (bounded correction) → independent critic → land |
+| `quality`          | `driver`, `worker`, `critic` | dynamic Driver loop → final verification → independent critic → land     |
 
-`driver` is present as the canonical future coordinator role (replacing older
-coordinator wording), but deliberately absent from the current workflow
-table. No producer emits a Driver invocation in this lot.
+`driver` is the canonical coordinator role (replacing older coordinator
+wording). It became executable in V1 Lot 3 through `quality`; `single` and
+`review` still do not emit Driver invocations.
 
 ### 5.2 Where correction lives — an explicit decision
 
@@ -448,28 +449,50 @@ machine), but `runTask` in `src/cli/run-command.ts` is 330 lines that mix three
 responsibilities — phase sequencing, plain-text rendering, and persistence
 flushing. A Driver bolted onto that would inherit all three.
 
-Planned separation, **not done in this branch**:
+Separation trigger. Lot 1 deliberately did not extract this. V1 Lot 3 adds a
+small `quality` coordinator because the first sequence that is not a subset of
+`single`/`review` now exists:
 
 ```
-Driver                plans, audits, decides go/stop        (does not exist yet)
+Driver                plans, audits, decides go/stop        (quality workflow)
     ↓ drives
-WorkflowExecutor      the phase sequence, UI-free           (today: inline in runTask)
+Quality coordinator   the Driver phase sequence, UI-free    (not generic)
     ↓ drives
 Orchestrator          one run's state machine + events      (exists, unchanged)
     ↓ ports
 Workspace / Verification / AgentAdapter                     (exist, unchanged)
 ```
 
-The trigger for extracting `WorkflowExecutor` is the first workflow whose phase
-sequence is not a subset of today's — i.e. `quality`, which inserts Driver phases
-before and after. Extracting it earlier would produce an executor with exactly
-one shape, validated by nothing. Yes, `ExecutionOrchestrator` and `Driver`
-should ultimately be separate objects: one owns _a_ run, the other owns _a
-sequence of runs and the decision to continue_.
+The generic `WorkflowExecutor` abstraction is still absent. The extraction is
+only `src/cli/quality-workflow.ts`, a concrete sequential coordinator for
+Driver decisions, bounded worker invocations, verification checkpoints, and
+final review.
 
 ---
 
-## 8. Driver v0 — proposed, not implemented
+## 8. Driver v0 — implemented status
+
+V1 Lot 3 implements a smaller dynamic loop than the earlier one-shot plan sketch
+below. The current decision actions are `delegate | verify | accept | stop`;
+retry, effort escalation, and target switching are represented by another
+`delegate` decision. There is no `Plan` or fixed subtask list.
+
+The implemented loop is:
+
+```
+observe bounded facts → Driver Invocation → structured decision
+                     → worker or verification checkpoint
+                     → observe again
+                     → accept/stop within deterministic limits
+```
+
+Driver decisions persist on `run.driverDecisions[]` and emit
+`driver.decision`; verification checkpoints persist in
+`run.verificationHistory[]`. Driver `accept` is refused unless the latest
+mandatory verification is green and fresh for the latest writable worker
+invocation.
+
+### 8.1 Earlier sketch retained for context
 
 Sequential only. One worker active at a time. No parallelism, no dependency
 graph, no distributed state.
@@ -481,7 +504,7 @@ Brief → Driver → structured Plan
              → final audit → land
 ```
 
-### 8.1 Minimal data model
+### 8.2 Earlier minimal data model
 
 ```ts
 interface Plan {
@@ -533,11 +556,10 @@ Rules that must hold on day one:
 - every decision is persisted and emitted as an event — no invisible judgment;
 - the plan is produced once, up front. Re-planning mid-run is v1 at the earliest.
 
-None of this is implemented. `Plan`, `Subtask`, `SubtaskResult` and
-`DriverDecision` are absent from `src/` on purpose: no workflow in this branch
-produces or consumes them.
+`Plan`, `Subtask`, and `SubtaskResult` remain absent from `src/`. The
+implemented record is the smaller dynamic `DriverDecision`.
 
-### 8.2 `RoleAssignment`, when it lands
+### 8.3 `RoleAssignment`, when it lands
 
 ```ts
 interface RoleAssignment {
@@ -563,8 +585,8 @@ runtimes or models.
 | `stat()`ing every positional to detect briefs                                      | rejected | turns the description `"README.md"` into a brief by accident (§4.6)                 |
 | Falling back to "treat it as a description" when a path-like positional is missing | rejected | a typo would burn a real agent call on a garbage objective                          |
 | Fetching briefs over http(s)                                                       | rejected | mutable remote breaks run reproducibility; no network in the engine                 |
-| `--workflow quality` registered now                                                | rejected | names a pipeline that cannot run; unknown-workflow error is more honest             |
-| Driver workflow implemented now                                                    | rejected | no Driver LLM in Lot 1; only the vocabulary and invocation record are needed        |
+| `--workflow quality` registered in Lot 1                                           | rejected | names a pipeline that cannot run; unknown-workflow error was more honest then       |
+| Driver workflow implemented in Lot 1                                               | rejected | no Driver LLM in Lot 1; only the vocabulary and invocation record were needed       |
 | Intelligent runtime routing implemented now                                        | rejected | explicit targets are enough until a Driver exists (§5.5)                            |
 | YAML/DSL workflow definitions                                                      | rejected | a configuration language with nothing yet to configure (§5.4)                       |
 | `ContextPacket` common abstraction                                                 | rejected | indirection over two pure functions that share no logic (§6)                        |
@@ -573,9 +595,9 @@ runtimes or models.
 | Precedence rule for `--workflow single --review`                                   | rejected | ambiguity should be an error, not a silent winner (§5.3)                            |
 
 **Challenge #9 — which proposed abstractions would be premature?**
-intelligent router, `ContextPacket`, `Plan`/`Subtask`/`DriverDecision`, a
-workflow DSL, and `WorkflowExecutor`. All five are specified above and none are
-in `src/`.
+intelligent router, `ContextPacket`, `Plan`/`Subtask`, a workflow DSL, and a
+generic `WorkflowExecutor`. V1 Lot 3 implements only the smaller
+`DriverDecision` record required by the dynamic loop.
 
 **Challenge #10 — the smallest design that evolves without a rewrite.** Exactly
 what this branch ships: one optional provenance field on `Task`, one optional
@@ -609,8 +631,8 @@ an _addition_ to those, not a change of them.
 - `examples/chessquest/brief.md` — benchmark brief (documentation only; the
   application is not generated).
 
-Non-goals for the branch, all respected: no parallel workers, no swarm, no
-planner, no Driver, no queue, no scheduler, no SQLite, no server, no web
+Non-goals for the original branch, all respected then: no parallel workers, no swarm,
+no planner, no Driver, no queue, no scheduler, no SQLite, no server, no web
 API, no remote execution, no provider marketplace, no model routing, no graph
 engine, no DSL, no plugin system, no new agent framework, no TUI rewrite, no
 repo-wide refactor.

@@ -86,12 +86,10 @@ strict dependency direction enforced by convention:
 
 ## Not implemented yet (explicit)
 
-- Multi-agent orchestration, planner, scheduler, message bus. The role/workflow
-  vocabulary exists (`src/core/workflow.ts`) and names the future coordinator
-  role `driver`, but no Driver invocation is produced yet;
-  `docs/brief-workflow-design.md` §8 specifies the next slice.
+- Generic multi-agent orchestration: no scheduler, message bus, workflow DSL,
+  graph engine, parallel workers, or worker-spawned workers. V1 Lot 3 adds only
+  the sequential `quality` Driver workflow described below.
 - Additional agent adapters beyond Codex and Claude Code (opencode, …).
-- Landing changes (committing/merging a run's worktree diff to the user's branch).
 - Configuration file (`conjunction.toml` or similar) — verification commands are
   CLI flags for now.
 - `.conjunction/` is not auto-added to the host repo's exclude file; in user repos it
@@ -256,9 +254,9 @@ in the architecture:
   content is not stored twice: `task.objective` is what actually reached the
   prompts.
 - **`src/core/workflow.ts`** introduces the role vocabulary: `Role`
-  (`driver | worker | critic`), `WorkflowName` (`single | review`), and a
-  hard-coded `WORKFLOWS` table. `driver` is the canonical future coordinator
-  name, but no workflow emits it yet. Core owns the vocabulary;
+  (`driver | worker | critic`), `WorkflowName` (`single | review | quality`),
+  and a hard-coded `WORKFLOWS` table. `quality` is the Driver workflow added in
+  V1 Lot 3. Core owns the vocabulary;
   `src/cli/run-command.ts` keeps owning the phase sequence and now derives
   `review` from `workflowIncludes(workflow, "critic")`.
 - **`Run.workflow?: WorkflowName`** persisted, optional for older runs.
@@ -274,9 +272,9 @@ in the architecture:
   file-sourced brief is announced as `## Brief (<path>)` instead of being nested
   under `## Objective`, so the brief's own headings don't collide.
 
-Deliberately NOT built (specified in the design doc instead): intelligent
-routing, `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/`DriverDecision`, a
-`WorkflowExecutor` extraction, a workflow DSL, and the Driver itself.
+Deliberately NOT built at this point (specified in the design doc instead):
+intelligent routing, `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`, a
+generic `WorkflowExecutor`, and a workflow DSL.
 
 ## V1 Lot 1 — execution model harness
 
@@ -336,6 +334,39 @@ This pass keeps the same serial workflow, but invocation targets are now real:
   perform edits with the selected permission mode. Non-trivial Bash command
   access still needs an explicit future policy; Conjunction deliberately does
   not grant a global `--allowedTools Bash`.
+
+## V1 Lot 3 — dynamic Driver
+
+This pass adds one real workflow, `quality`, without changing the lifecycle of
+`single` or `review`:
+
+- **Driver as an invocation:** the Driver is not a special adapter. It is a
+  normal `Invocation` with `role: "driver"`, `readOnly: true`, an
+  `ExecutionTarget`, and `DRIVER_DECISION_SCHEMA` structured output. Runtime
+  capabilities are still enforced by `Orchestrator` before the invocation starts.
+- **Small decision model:** `DriverDecision.action` is
+  `delegate | verify | accept | stop`. Retry, target switch, and effort
+  escalation are represented as a new `delegate` decision with target/objective
+  and optional `reasoningEffort`; no extra routing primitive exists.
+- **Target pool:** `quality` receives an explicit list of allowed worker targets
+  (`id -> ExecutionTarget + capabilities`). The Driver can choose only by
+  target id; unknown ids fail the run before a worker invocation is created.
+- **Loop and limits:** `src/cli/quality-workflow.ts` is the first UI-free
+  coordinator for a genuinely different sequence. It is sequential only and
+  capped by deterministic limits (`maxDriverDecisions`,
+  `maxWritableInvocations`).
+- **Verification freshness:** writable worker invocations make verification
+  stale. `Orchestrator.verifyRunCheckpoint()` records non-terminal verification
+  history (`run.verificationHistory[]`) and returns to `running`; Driver
+  `accept` is refused unless the latest verification is green and checks the
+  latest writable invocation.
+- **Persistence/events:** valid decisions are stored on `run.driverDecisions[]`
+  and emitted as `driver.decision`. `run.invocations[]` remains the source of
+  truth for dynamic workflow execution; legacy `attempts[]` is untouched by
+  Driver workers.
+- **Final critic:** after Driver accept, `quality` runs one final deterministic
+  verification through the existing terminal path and then the independent
+  read-only critic. The critic target can differ from both Driver and workers.
 
 `examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
 identical input. Conjunction does not build that application.

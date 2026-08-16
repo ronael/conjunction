@@ -22,7 +22,7 @@ const ALL_STATES: RunState[] = [
 const ALLOWED: Record<RunState, RunState[]> = {
   pending: ["running", "cancelled"],
   running: ["verifying", "failed", "cancelled"],
-  verifying: ["completed", "failed", "correcting", "reviewing", "cancelled"],
+  verifying: ["running", "completed", "failed", "correcting", "reviewing", "cancelled"],
   correcting: ["verifying", "failed", "cancelled"],
   reviewing: ["completed", "cancelled"],
   completed: [],
@@ -88,6 +88,15 @@ describe("run state machine", () => {
     transitionRun(run, "verifying", "t2");
     transitionRun(run, "completed", "t3");
     expect(run.state).toBe("completed");
+  });
+
+  it("walks a Driver verification checkpoint: running -> verifying -> running", () => {
+    const run = makeRun("running");
+    run.startedAt = "t0";
+    transitionRun(run, "verifying", "t1");
+    transitionRun(run, "running", "t2");
+    expect(run.state).toBe("running");
+    expect(run.startedAt).toBe("t0");
   });
 
   it("correcting cannot restart or skip verification (no self-loop, no shortcuts)", () => {

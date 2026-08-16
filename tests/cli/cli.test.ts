@@ -1194,13 +1194,13 @@ describe("cli run — workflows", () => {
   it("an unknown workflow is a usage error listing the available ones", async () => {
     const repo = await makeTempRepo();
     const io = capture();
-    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "quality"], {
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "bogus"], {
       adapter: fileCreatingStub,
       out: io.out,
     });
     expect(code).toBe(2);
-    expect(io.text()).toContain('unknown workflow "quality"');
-    expect(io.text()).toContain("available: single, review");
+    expect(io.text()).toContain('unknown workflow "bogus"');
+    expect(io.text()).toContain("available: single, review, quality");
   });
 
   it("--review contradicting --workflow single is refused, not silently resolved", async () => {

@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type {
   ExecutionTarget,
+  DriverLimits,
   ReasoningEffort,
   Run,
   RunReview,
@@ -36,6 +37,7 @@ import {
 import type { Brief } from "./brief.js";
 import { RunStore } from "./run-store.js";
 import { findingsSummary, formatDuration } from "./format.js";
+import { runQualityTask } from "./quality-workflow.js";
 
 /** Daytona-style checklist line for plain output: "✓ Workspace ready    <detail>". */
 function stepLine(symbol: string, label: string, detail?: string): string {
@@ -63,9 +65,11 @@ function agentStepLine(run: Run, label: string): string {
 }
 
 export interface SelectedRuntimeTarget {
-  role: "worker" | "critic";
+  role: "driver" | "worker" | "critic";
   target: ExecutionTarget;
   explicitEffort?: ReasoningEffort;
+  requiresReadOnly?: boolean;
+  requiresStructuredOutput?: boolean;
 }
 
 export function selectedRuntimeTargets(
@@ -93,6 +97,11 @@ export function selectedRuntimeTargets(
   return selected;
 }
 
+export interface WorkerTargetInput {
+  id: string;
+  target: ExecutionTarget;
+}
+
 export interface RunTaskOptions {
   /** The run's source of truth: inline description or loaded brief file. */
   brief: Brief;
@@ -102,6 +111,12 @@ export interface RunTaskOptions {
   workerTarget: ExecutionTarget;
   /** Explicit worker effort intent; default is recorded as medium by core. */
   workerReasoningEffort?: ReasoningEffort;
+  /** Allowed writable worker targets for the Driver workflow. */
+  workerTargets?: readonly WorkerTargetInput[];
+  /** Target used for Driver invocations; defaults to workerTarget. */
+  driverTarget?: ExecutionTarget;
+  /** Explicit driver effort intent; default is recorded as medium by core. */
+  driverReasoningEffort?: ReasoningEffort;
   /** Target used for the critic invocation; defaults to the worker target. */
   criticTarget?: ExecutionTarget;
   /** Explicit critic effort intent; default is recorded as medium by core. */
@@ -116,6 +131,8 @@ export interface RunTaskOptions {
    * same worker and re-verify. Meaningful only when verifyCommands is non-empty.
    */
   correct: boolean;
+  /** Deterministic caps for the Driver workflow; defaults live in core. */
+  qualityLimits?: Partial<DriverLimits>;
 }
 
 /**
@@ -167,6 +184,10 @@ export interface RunTaskResult {
  * the run completed (agent clean + verification passed/vacuous).
  */
 export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promise<RunTaskResult> {
+  if (options.workflow === "quality") {
+    return await runQualityTask(options, deps);
+  }
+
   const { out, observer } = deps;
   const review = workflowIncludes(options.workflow, "critic");
   const selectedTargets = selectedRuntimeTargets(options, review);

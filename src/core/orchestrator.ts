@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import type { AgentAdapter, AgentRunInput, AgentRunResult, RuntimeRegistry } from "./agent.js";
+import type { DriverDecision, DriverDecisionRecord } from "./driver.js";
+import { verificationFailureSignature } from "./driver.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
 import { buildWorkerInstructions } from "./instructions.js";
 import type { ExecutionTarget, Invocation, ReasoningEffort } from "./invocation.js";
@@ -11,10 +13,11 @@ import {
   type AgentAttemptOutcome,
   type Attempt,
   type Run,
+  type VerificationRecord,
   type VerificationOutcome,
 } from "./run.js";
 import { createTask, type Task, type TaskInput } from "./task.js";
-import type { WorkflowName } from "./workflow.js";
+import type { Role, WorkflowName } from "./workflow.js";
 
 /** Lot 6: hard cap on self-healing. One correction attempt per run, ever. */
 export const MAX_CORRECTIONS_PER_RUN = 1;
@@ -104,6 +107,24 @@ export interface ExecuteRunOptions {
   /** Forwarded agent output, after it has been recorded as agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
 }
+
+export interface InvokeAgentOptions extends ExecuteRunOptions {
+  role: Role;
+  instructions: string;
+  parentInvocationId?: string;
+  readOnly?: boolean;
+  outputSchema?: unknown;
+}
+
+export interface AgentInvocationResult {
+  run: Run;
+  invocation: Invocation;
+  result: AgentRunResult;
+}
+
+export type ReviewRunOptions = ExecuteRunOptions & {
+  parentInvocationId?: string;
+};
 
 type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
   ? Omit<E, "id" | "timestamp">
@@ -224,6 +245,22 @@ export class Orchestrator {
   }
 
   /**
+   * Executes one explicitly described Invocation without touching legacy
+   * `attempts[]`. Dynamic workflows use this; the historic methods above keep
+   * their compatibility bookkeeping.
+   */
+  async invokeAgent(runId: string, options: InvokeAgentOptions): Promise<AgentInvocationResult> {
+    const run = this.#requireRun(runId);
+    if (run.state !== "running") {
+      throw new RunNotExecutableError(`state must be "running", got "${run.state}"`);
+    }
+    return await this.#invokeAgent(run, options, {
+      recordAttempt: false,
+      updateRunResult: false,
+    });
+  }
+
+  /**
    * The single bounded correction attempt (lot 6). The run must be in state
    * "correcting" (verifyRun with correction enabled put it there after a
    * failed verification). The packet — built by buildCorrectionPacket in the
@@ -276,13 +313,67 @@ export class Orchestrator {
     inputOptions?: {
       instructions?: string;
       parentInvocationId?: string;
-      role?: "worker" | "critic";
+      role?: Role;
       target?: ExecutionTarget;
       explicitReasoningEffort?: ReasoningEffort;
       readOnly?: boolean;
       outputSchema?: unknown;
     },
   ): Promise<AgentRunResult> {
+    const invokeOptions: InvokeAgentOptions = {
+      timeoutMs: options.timeoutMs,
+      role: inputOptions?.role ?? "worker",
+      instructions: inputOptions?.instructions ?? buildWorkerInstructions(task),
+    };
+    if (inputOptions?.parentInvocationId !== undefined) {
+      invokeOptions.parentInvocationId = inputOptions.parentInvocationId;
+    }
+    if (inputOptions?.target !== undefined) {
+      invokeOptions.target = inputOptions.target;
+    } else if (options.target !== undefined) {
+      invokeOptions.target = options.target;
+    }
+    if (inputOptions?.explicitReasoningEffort !== undefined) {
+      invokeOptions.explicitReasoningEffort = inputOptions.explicitReasoningEffort;
+    } else if (options.explicitReasoningEffort !== undefined) {
+      invokeOptions.explicitReasoningEffort = options.explicitReasoningEffort;
+    }
+    if (inputOptions?.readOnly !== undefined) {
+      invokeOptions.readOnly = inputOptions.readOnly;
+    }
+    if (inputOptions?.outputSchema !== undefined) {
+      invokeOptions.outputSchema = inputOptions.outputSchema;
+    }
+    if (options.signal !== undefined) {
+      invokeOptions.signal = options.signal;
+    }
+    if (options.onOutput !== undefined) {
+      invokeOptions.onOutput = options.onOutput;
+    }
+    const legacyOptions: {
+      recordAttempt: boolean;
+      updateRunResult: boolean;
+      correctionPacket?: string;
+    } = {
+      recordAttempt: true,
+      updateRunResult: true,
+    };
+    if (inputOptions?.instructions !== undefined) {
+      legacyOptions.correctionPacket = inputOptions.instructions;
+    }
+    const outcome = await this.#invokeAgent(run, invokeOptions, legacyOptions);
+    return outcome.result;
+  }
+
+  async #invokeAgent(
+    run: Run,
+    options: InvokeAgentOptions,
+    bookkeeping: {
+      recordAttempt: boolean;
+      updateRunResult: boolean;
+      correctionPacket?: string;
+    },
+  ): Promise<AgentInvocationResult> {
     if (!this.deps.runtimeRegistry) {
       throw new MissingDependencyError("runtimeRegistry");
     }
@@ -292,19 +383,18 @@ export class Orchestrator {
       );
     }
 
-    const target = inputOptions?.target ?? options.target ?? run.target ?? { runtime: run.runtime };
-    const explicitReasoningEffort =
-      inputOptions?.explicitReasoningEffort ?? options.explicitReasoningEffort;
+    const target = options.target ?? run.target ?? { runtime: run.runtime };
+    const explicitReasoningEffort = options.explicitReasoningEffort;
     const reasoningEffort = explicitReasoningEffort ?? "medium";
     const requirements: RuntimeCapabilityRequirements = {};
     if (explicitReasoningEffort !== undefined) {
       requirements.explicitReasoningEffort = explicitReasoningEffort;
     }
-    if (inputOptions?.readOnly !== undefined) {
-      requirements.readOnly = inputOptions.readOnly;
+    if (options.readOnly !== undefined) {
+      requirements.readOnly = options.readOnly;
     }
-    if (inputOptions?.outputSchema !== undefined) {
-      requirements.outputSchema = inputOptions.outputSchema;
+    if (options.outputSchema !== undefined) {
+      requirements.outputSchema = options.outputSchema;
     }
     const adapter = this.#adapterForTarget(target, requirements);
 
@@ -317,29 +407,28 @@ export class Orchestrator {
       target,
       reasoningEffort,
     };
-    if (inputOptions?.parentInvocationId !== undefined) {
-      invocationOptions.parentInvocationId = inputOptions.parentInvocationId;
+    if (options.parentInvocationId !== undefined) {
+      invocationOptions.parentInvocationId = options.parentInvocationId;
     }
-    if (inputOptions?.readOnly !== undefined) {
-      invocationOptions.readOnly = inputOptions.readOnly;
+    if (options.readOnly !== undefined) {
+      invocationOptions.readOnly = options.readOnly;
     }
-    const invocation = this.#createInvocation(
-      run,
-      inputOptions?.role ?? "worker",
-      invocationOptions,
-    );
+    const invocation = this.#createInvocation(run, options.role, invocationOptions);
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
-    const attempt: Attempt = {
-      index: run.attempts.length + 1,
-      invocationId: invocation.id,
-      startedAt: invocation.startedAt,
-    };
-    if (inputOptions?.instructions !== undefined) {
-      attempt.correctionPacket = inputOptions.instructions;
+    let attempt: Attempt | undefined;
+    if (bookkeeping.recordAttempt) {
+      attempt = {
+        index: run.attempts.length + 1,
+        invocationId: invocation.id,
+        startedAt: invocation.startedAt,
+      };
+      if (bookkeeping.correctionPacket !== undefined) {
+        attempt.correctionPacket = bookkeeping.correctionPacket;
+      }
+      run.attempts.push(attempt);
     }
-    run.attempts.push(attempt);
 
     this.#emit({
       type: "agent.started",
@@ -351,7 +440,7 @@ export class Orchestrator {
     const input: AgentRunInput = {
       target: invocation.target,
       reasoningEffort: invocation.reasoningEffort,
-      instructions: inputOptions?.instructions ?? buildWorkerInstructions(task),
+      instructions: options.instructions,
       workspacePath: run.workspacePath,
       timeoutMs: options.timeoutMs,
       onOutput: (chunk, stream) => {
@@ -367,26 +456,29 @@ export class Orchestrator {
     if (options.signal !== undefined) {
       input.signal = options.signal;
     }
-    if (inputOptions?.readOnly !== undefined) {
-      input.readOnly = inputOptions.readOnly;
+    if (options.readOnly !== undefined) {
+      input.readOnly = options.readOnly;
     }
-    if (inputOptions?.outputSchema !== undefined) {
-      input.outputSchema = inputOptions.outputSchema;
+    if (options.outputSchema !== undefined) {
+      input.outputSchema = options.outputSchema;
     }
 
     const result = await adapter.run(input);
-
-    attempt.completedAt = this.#timestamp();
-    attempt.agentResult = {
+    const completedAt = this.#timestamp();
+    const agentResult: AgentAttemptOutcome = {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       aborted: result.aborted,
     };
     if (result.lastMessage !== undefined) {
-      attempt.agentResult.summary = result.lastMessage;
+      agentResult.summary = result.lastMessage;
     }
-    invocation.completedAt = attempt.completedAt;
-    invocation.outcome = attempt.agentResult;
+    if (attempt !== undefined) {
+      attempt.completedAt = completedAt;
+      attempt.agentResult = agentResult;
+    }
+    invocation.completedAt = completedAt;
+    invocation.outcome = agentResult;
 
     this.#emit({
       type: "agent.completed",
@@ -394,7 +486,7 @@ export class Orchestrator {
       runId: run.id,
       payload: { exitCode: result.exitCode, invocationId: invocation.id },
     });
-    if (result.lastMessage !== undefined) {
+    if (bookkeeping.updateRunResult && result.lastMessage !== undefined) {
       run.result = { summary: result.lastMessage };
     }
 
@@ -414,7 +506,7 @@ export class Orchestrator {
       invocation.state = "completed";
       invocation.terminationReason = "completed";
     }
-    return result;
+    return { run, invocation, result };
   }
 
   /**
@@ -451,6 +543,84 @@ export class Orchestrator {
     return run;
   }
 
+  recordDriverDecision(
+    runId: string,
+    invocationId: string,
+    decision: DriverDecision,
+  ): DriverDecisionRecord {
+    const run = this.#requireRun(runId);
+    const invocation = this.#invocationById(run, invocationId);
+    if (invocation?.role !== "driver") {
+      throw new RunNotExecutableError("driver decision must reference a driver invocation");
+    }
+    const record: DriverDecisionRecord = {
+      id: this.#createId(),
+      invocationId,
+      createdAt: this.#timestamp(),
+      ...decision,
+    };
+    run.driverDecisions ??= [];
+    run.driverDecisions.push(record);
+    this.#emit({
+      type: "driver.decision",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: {
+        decisionId: record.id,
+        invocationId,
+        action: record.action,
+        reason: record.reason,
+      },
+    });
+    return record;
+  }
+
+  /**
+   * Non-terminal deterministic verification checkpoint for dynamic workflows.
+   * It records the latest outcome/history and returns the run to "running" so
+   * the Driver can decide the next action. `verifyRun()` remains the legacy
+   * terminal verifier used by single/review.
+   */
+  async verifyRunCheckpoint(runId: string): Promise<Run> {
+    const run = this.#requireRun(runId);
+    if (!this.deps.verification) {
+      throw new MissingDependencyError("verification");
+    }
+    if (run.state !== "running") {
+      throw new RunNotExecutableError(`state must be "running", got "${run.state}"`);
+    }
+    const startedAt = this.#timestamp();
+    transitionRun(run, "verifying", startedAt);
+    this.#emit({
+      type: "verification.started",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: {},
+    });
+
+    const outcome = await this.deps.verification.verify(run);
+    run.verificationResult = outcome;
+    this.#recordVerification(run, outcome, startedAt);
+
+    if (outcome.passed) {
+      this.#emit({
+        type: "verification.passed",
+        taskId: run.taskId,
+        runId: run.id,
+        payload: {},
+      });
+    } else {
+      this.#emit({
+        type: "verification.failed",
+        taskId: run.taskId,
+        runId: run.id,
+        payload: { failedCommands: failedCommandNames(run) },
+      });
+    }
+    transitionRun(run, "running", this.#timestamp());
+    return run;
+  }
+
   /**
    * running -> verifying -> completed | failed, driven by the injected
    * VerificationRunner. The run's verificationResult is attached either way.
@@ -471,7 +641,8 @@ export class Orchestrator {
     if (!this.deps.verification) {
       throw new MissingDependencyError("verification");
     }
-    transitionRun(run, "verifying", this.#timestamp());
+    const startedAt = this.#timestamp();
+    transitionRun(run, "verifying", startedAt);
     this.#emit({
       type: "verification.started",
       taskId: run.taskId,
@@ -481,6 +652,7 @@ export class Orchestrator {
 
     const outcome = await this.deps.verification.verify(run);
     run.verificationResult = outcome;
+    this.#recordVerification(run, outcome, startedAt);
 
     if (outcome.passed) {
       this.#emit({
@@ -546,7 +718,7 @@ export class Orchestrator {
    * it is recorded on `run.review.error` and the run completes. Findings
    * never feed the correction loop. Abort (q / Ctrl-C) cancels the run.
    */
-  async reviewRun(runId: string, packet: string, options: ExecuteRunOptions): Promise<Run> {
+  async reviewRun(runId: string, packet: string, options: ReviewRunOptions): Promise<Run> {
     const run = this.#requireRun(runId);
     const task = this.#requireTask(run.taskId);
     if (!this.deps.runtimeRegistry) {
@@ -561,7 +733,7 @@ export class Orchestrator {
       );
     }
 
-    const parentInvocationId = run.attempts.at(-1)?.invocationId;
+    const parentInvocationId = options.parentInvocationId ?? run.attempts.at(-1)?.invocationId;
     const target = options.target ?? run.target ?? { runtime: run.runtime };
     const explicitReasoningEffort = options.explicitReasoningEffort;
     const reasoningEffort = explicitReasoningEffort ?? "medium";
@@ -698,6 +870,33 @@ export class Orchestrator {
 
   #timestamp(): string {
     return this.#now().toISOString();
+  }
+
+  #recordVerification(
+    run: Run,
+    outcome: VerificationOutcome,
+    startedAt: string,
+  ): VerificationRecord {
+    const record: VerificationRecord = {
+      id: this.#createId(),
+      startedAt,
+      completedAt: this.#timestamp(),
+      outcome,
+      failureSignature: verificationFailureSignature(outcome),
+    };
+    const lastWritableInvocationId = this.#lastWritableInvocation(run)?.id;
+    if (lastWritableInvocationId !== undefined) {
+      record.afterInvocationId = lastWritableInvocationId;
+    }
+    run.verificationHistory ??= [];
+    run.verificationHistory.push(record);
+    return record;
+  }
+
+  #lastWritableInvocation(run: Run): Invocation | undefined {
+    return [...(run.invocations ?? [])]
+      .reverse()
+      .find((invocation) => invocation.role === "worker" && invocation.readOnly !== true);
   }
 
   #adapterForTarget(

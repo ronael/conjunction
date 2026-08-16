@@ -38,6 +38,14 @@ export interface AgentCompletedEvent
     EventBase<"agent.completed", { exitCode: number | null; invocationId: string }>,
     RunScoped {}
 
+export interface DriverDecisionEvent
+  extends
+    EventBase<
+      "driver.decision",
+      { decisionId: string; invocationId: string; action: string; reason: string }
+    >,
+    RunScoped {}
+
 export interface VerificationStartedEvent
   extends EventBase<"verification.started", Record<string, never>>, RunScoped {}
 
@@ -94,6 +102,7 @@ export type ConjunctionEvent =
   | AgentStartedEvent
   | AgentOutputEvent
   | AgentCompletedEvent
+  | DriverDecisionEvent
   | VerificationStartedEvent
   | VerificationFailedEvent
   | VerificationPassedEvent

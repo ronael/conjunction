@@ -36,12 +36,12 @@ describe("workflows", () => {
     expect(workflowIncludes("review", "critic")).toBe(true);
   });
 
-  it("canonically names the future lead/supervisor role as driver without scheduling it yet", () => {
+  it("quality schedules the canonical driver role without adding providers to workflow names", () => {
     const driver: Role = "driver";
     expect(driver).toBe("driver");
-    for (const name of WORKFLOW_NAMES) {
-      expect(workflowIncludes(name, "driver")).toBe(false);
-    }
+    expect(workflowIncludes("single", "driver")).toBe(false);
+    expect(workflowIncludes("review", "driver")).toBe(false);
+    expect(workflowIncludes("quality", "driver")).toBe(true);
   });
 
   it("every workflow includes a worker — nothing runs without one", () => {
@@ -53,7 +53,7 @@ describe("workflows", () => {
   it("isWorkflowName narrows only known names", () => {
     expect(isWorkflowName("single")).toBe(true);
     expect(isWorkflowName("review")).toBe(true);
-    expect(isWorkflowName("quality")).toBe(false); // designed, not implemented
+    expect(isWorkflowName("quality")).toBe(true);
     expect(isWorkflowName("")).toBe(false);
   });
 });

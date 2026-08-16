@@ -19,7 +19,7 @@
  */
 export type Role = "driver" | "worker" | "critic";
 
-export type WorkflowName = "single" | "review";
+export type WorkflowName = "single" | "review" | "quality";
 
 export interface WorkflowDefinition {
   readonly name: WorkflowName;
@@ -47,9 +47,14 @@ export const WORKFLOWS: Readonly<Record<WorkflowName, WorkflowDefinition>> = {
     roles: ["worker", "critic"],
     description: "worker → verification → independent read-only critic",
   },
+  quality: {
+    name: "quality",
+    roles: ["driver", "worker", "critic"],
+    description: "dynamic read-only driver → workers/checks loop → independent critic",
+  },
 };
 
-export const WORKFLOW_NAMES: readonly WorkflowName[] = ["single", "review"];
+export const WORKFLOW_NAMES: readonly WorkflowName[] = ["single", "review", "quality"];
 
 /** Reproduces the pre-workflow default: worker + verification + correction. */
 export const DEFAULT_WORKFLOW: WorkflowName = "single";
