@@ -205,6 +205,11 @@ Retry, target switch, and effort escalation are all represented as another
 V1 caps are deterministic: max 8 Driver decisions and max 4 writable worker
 invocations. Driver decisions are stored in `run.driverDecisions[]`; verification
 checkpoints are stored in `run.verificationHistory[]`.
+Each writable worker invocation records whether its before/after worktree diff
+fingerprint changed. The next Driver packet exposes this as
+`lastWorkerChangedWorkspace`, alongside consecutive repeated verification
+failure counts, so the Driver can reason about stalls without Conjunction doing
+AI-based code quality analysis.
 
 ## Interactive TUI
 

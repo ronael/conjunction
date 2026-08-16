@@ -13,7 +13,6 @@ export interface DriverDecision {
   objective?: string;
   reasoningEffort?: ReasoningEffort;
   guidance?: string;
-  supersedesInvocationId?: string;
 }
 
 export interface DriverDecisionRecord extends DriverDecision {
@@ -47,6 +46,7 @@ export interface DriverProgressFacts {
   readonly repeatedFailureSignatureCount: number;
   readonly lastWorkerTargetId?: string;
   readonly lastWorkerEffort?: ReasoningEffort;
+  readonly lastWorkerChangedWorkspace?: boolean;
   readonly worktreeChanged: boolean;
 }
 
@@ -74,7 +74,6 @@ export const DRIVER_DECISION_SCHEMA = {
     objective: { type: "string" },
     reasoningEffort: { type: "string", enum: [...REASONING_EFFORTS] },
     guidance: { type: "string" },
-    supersedesInvocationId: { type: "string" },
   },
 } as const;
 
@@ -88,7 +87,6 @@ const DRIVER_DECISION_KEYS = new Set([
   "objective",
   "reasoningEffort",
   "guidance",
-  "supersedesInvocationId",
 ]);
 
 export function parseDriverDecision(raw: string): DriverDecisionParseResult {
@@ -142,19 +140,6 @@ export function parseDriverDecision(raw: string): DriverDecisionParseResult {
     }
     decision.guidance = record.guidance;
   }
-  if (record.supersedesInvocationId !== undefined) {
-    if (
-      typeof record.supersedesInvocationId !== "string" ||
-      record.supersedesInvocationId.trim().length === 0
-    ) {
-      return {
-        ok: false,
-        error: "driver decision supersedesInvocationId must be a non-empty string",
-      };
-    }
-    decision.supersedesInvocationId = record.supersedesInvocationId;
-  }
-
   if (decision.action === "delegate") {
     if (decision.targetId === undefined) {
       return { ok: false, error: "delegate decision requires targetId" };
@@ -298,6 +283,7 @@ function summarizeInvocation(invocation: Invocation): {
   target: ExecutionTarget;
   reasoningEffort: ReasoningEffort;
   readOnly: boolean;
+  workspaceChanged?: boolean;
   state: Invocation["state"];
   terminationReason?: Invocation["terminationReason"];
   summary?: string;
@@ -311,6 +297,9 @@ function summarizeInvocation(invocation: Invocation): {
     target: invocation.target,
     reasoningEffort: invocation.reasoningEffort,
     readOnly: invocation.readOnly === true,
+    ...(invocation.workspaceChange !== undefined
+      ? { workspaceChanged: invocation.workspaceChange.changed }
+      : {}),
     state: invocation.state,
     ...(invocation.terminationReason !== undefined
       ? { terminationReason: invocation.terminationReason }

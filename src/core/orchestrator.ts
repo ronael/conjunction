@@ -108,13 +108,21 @@ export interface ExecuteRunOptions {
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
 }
 
-export interface InvokeAgentOptions extends ExecuteRunOptions {
-  role: Role;
+interface InvokeAgentBaseOptions extends ExecuteRunOptions {
   instructions: string;
   parentInvocationId?: string;
-  readOnly?: boolean;
   outputSchema?: unknown;
 }
+
+export type InvokeAgentOptions =
+  | (InvokeAgentBaseOptions & {
+      role: "worker";
+      readOnly?: boolean;
+    })
+  | (InvokeAgentBaseOptions & {
+      role: "driver" | "critic";
+      readOnly?: true;
+    });
 
 export interface AgentInvocationResult {
   run: Run;
@@ -386,12 +394,13 @@ export class Orchestrator {
     const target = options.target ?? run.target ?? { runtime: run.runtime };
     const explicitReasoningEffort = options.explicitReasoningEffort;
     const reasoningEffort = explicitReasoningEffort ?? "medium";
+    const readOnly = this.#readOnlyForRole(options.role, options.readOnly);
     const requirements: RuntimeCapabilityRequirements = {};
     if (explicitReasoningEffort !== undefined) {
       requirements.explicitReasoningEffort = explicitReasoningEffort;
     }
-    if (options.readOnly !== undefined) {
-      requirements.readOnly = options.readOnly;
+    if (readOnly === true) {
+      requirements.readOnly = true;
     }
     if (options.outputSchema !== undefined) {
       requirements.outputSchema = options.outputSchema;
@@ -410,8 +419,8 @@ export class Orchestrator {
     if (options.parentInvocationId !== undefined) {
       invocationOptions.parentInvocationId = options.parentInvocationId;
     }
-    if (options.readOnly !== undefined) {
-      invocationOptions.readOnly = options.readOnly;
+    if (readOnly !== undefined) {
+      invocationOptions.readOnly = readOnly;
     }
     const invocation = this.#createInvocation(run, options.role, invocationOptions);
     invocation.state = "running";
@@ -456,8 +465,8 @@ export class Orchestrator {
     if (options.signal !== undefined) {
       input.signal = options.signal;
     }
-    if (options.readOnly !== undefined) {
-      input.readOnly = options.readOnly;
+    if (readOnly !== undefined) {
+      input.readOnly = readOnly;
     }
     if (options.outputSchema !== undefined) {
       input.outputSchema = options.outputSchema;
@@ -507,6 +516,16 @@ export class Orchestrator {
       invocation.terminationReason = "completed";
     }
     return { run, invocation, result };
+  }
+
+  #readOnlyForRole(role: Role, requested: boolean | undefined): boolean | undefined {
+    if (role === "driver" || role === "critic") {
+      if (requested === false) {
+        throw new RunNotExecutableError(`${role} invocations are always read-only`);
+      }
+      return true;
+    }
+    return requested;
   }
 
   /**

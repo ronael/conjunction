@@ -456,17 +456,20 @@ small `quality` coordinator because the first sequence that is not a subset of
 ```
 Driver                plans, audits, decides go/stop        (quality workflow)
     ↓ drives
-Quality coordinator   the Driver phase sequence, UI-free    (not generic)
+Quality strategy      the Driver phase sequence + CLI edge  (not generic)
     ↓ drives
 Orchestrator          one run's state machine + events      (exists, unchanged)
     ↓ ports
 Workspace / Verification / AgentAdapter                     (exist, unchanged)
 ```
 
-The generic `WorkflowExecutor` abstraction is still absent. The extraction is
-only `src/cli/quality-workflow.ts`, a concrete sequential coordinator for
-Driver decisions, bounded worker invocations, verification checkpoints, and
-final review.
+The generic `WorkflowExecutor` abstraction is still absent. The shared
+extraction is only `src/cli/run-session.ts`: repo/worktree setup, Orchestrator
+wiring, verification port, persistence flushing, cancellation checks, and
+cleanup. `src/cli/quality-workflow.ts` remains a concrete sequential strategy
+for Driver decisions, bounded worker invocations, verification checkpoints, and
+final review; it is not presented as a UI-free engine because it still owns the
+plain CLI rendering for this workflow.
 
 ---
 
@@ -490,7 +493,11 @@ Driver decisions persist on `run.driverDecisions[]` and emit
 `driver.decision`; verification checkpoints persist in
 `run.verificationHistory[]`. Driver `accept` is refused unless the latest
 mandatory verification is green and fresh for the latest writable worker
-invocation.
+invocation. Writable worker invocations record a deterministic
+`workspaceChange` diff fingerprint comparison so the next Driver context can
+distinguish "the worktree has changes" from "the last worker changed nothing".
+Repeated verification failure facts are consecutive, not total historical
+counts.
 
 ### 8.1 Earlier sketch retained for context
 

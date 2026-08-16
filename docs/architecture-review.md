@@ -344,6 +344,8 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
   normal `Invocation` with `role: "driver"`, `readOnly: true`, an
   `ExecutionTarget`, and `DRIVER_DECISION_SCHEMA` structured output. Runtime
   capabilities are still enforced by `Orchestrator` before the invocation starts.
+  Core derives `readOnly: true` for `driver` and `critic` roles, so callers
+  cannot accidentally create a writable Driver/Critic invocation.
 - **Small decision model:** `DriverDecision.action` is
   `delegate | verify | accept | stop`. Retry, target switch, and effort
   escalation are represented as a new `delegate` decision with target/objective
@@ -351,10 +353,14 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
 - **Target pool:** `quality` receives an explicit list of allowed worker targets
   (`id -> ExecutionTarget + capabilities`). The Driver can choose only by
   target id; unknown ids fail the run before a worker invocation is created.
-- **Loop and limits:** `src/cli/quality-workflow.ts` is the first UI-free
-  coordinator for a genuinely different sequence. It is sequential only and
-  capped by deterministic limits (`maxDriverDecisions`,
-  `maxWritableInvocations`).
+- **Shared execution plumbing:** `src/cli/run-session.ts` owns the common repo
+  root resolution, Orchestrator wiring, worktree setup, verification runner,
+  run persistence flushing, cancellation checks, and cleanup. The strategies
+  remain separate: `run-command.ts` keeps `single`/`review`, while
+  `quality-workflow.ts` owns only the Driver decision loop and its CLI rendering.
+  This is not a workflow engine.
+- **Loop and limits:** `quality` is sequential only and capped by deterministic
+  limits (`maxDriverDecisions`, `maxWritableInvocations`).
 - **Verification freshness:** writable worker invocations make verification
   stale. `Orchestrator.verifyRunCheckpoint()` records non-terminal verification
   history (`run.verificationHistory[]`) and returns to `running`; Driver
@@ -363,7 +369,9 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
 - **Persistence/events:** valid decisions are stored on `run.driverDecisions[]`
   and emitted as `driver.decision`. `run.invocations[]` remains the source of
   truth for dynamic workflow execution; legacy `attempts[]` is untouched by
-  Driver workers.
+  Driver workers. Writable worker invocations may carry `workspaceChange`, a
+  deterministic before/after diff fingerprint comparison used to expose
+  `lastWorkerChangedWorkspace` to the next Driver invocation.
 - **Final critic:** after Driver accept, `quality` runs one final deterministic
   verification through the existing terminal path and then the independent
   read-only critic. The critic target can differ from both Driver and workers.

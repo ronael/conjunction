@@ -16,6 +16,12 @@ export type InvocationState = "pending" | "running" | "completed" | "failed" | "
 
 export type InvocationTerminationReason = "completed" | "process_failed" | "timed_out" | "aborted";
 
+export interface InvocationWorkspaceChange {
+  readonly beforeFingerprint: string;
+  readonly afterFingerprint: string;
+  readonly changed: boolean;
+}
+
 /**
  * One agent invocation within a run: worker attempt, correction attempt,
  * future driver call, or critic call. It is deliberately a record, not a
@@ -36,4 +42,6 @@ export interface Invocation {
   terminationReason?: InvocationTerminationReason;
   /** Read-only is an execution constraint for critic/reviewer invocations. */
   readOnly?: boolean;
+  /** Deterministic workspace-diff comparison captured around writable invocations. */
+  workspaceChange?: InvocationWorkspaceChange;
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type {
@@ -7,7 +8,6 @@ import type {
   ReasoningEffort,
   Run,
   RuntimeRegistry,
-  Task,
 } from "../core/index.js";
 import {
   buildDelegatedWorkerPacket,
@@ -15,31 +15,20 @@ import {
   buildReviewerPacket,
   DEFAULT_DRIVER_LIMITS,
   DRIVER_DECISION_SCHEMA,
-  Orchestrator,
   parseDriverDecision,
   UnsupportedRuntimeCapabilityError,
   workflowIncludes,
 } from "../core/index.js";
-import type { VerificationResult } from "../verification/index.js";
-import { runVerification } from "../verification/index.js";
-import {
-  createRunWorkspace,
-  DirtyWorktreeError,
-  findRepoRoot,
-  getCurrentBranch,
-  getHeadCommit,
-  getWorktreeDiff,
-  removeRunWorkspace,
-} from "../workspace/index.js";
+import { getCurrentBranch, getHeadCommit, getWorktreeDiff } from "../workspace/index.js";
 
-import { findingsSummary, formatDuration } from "./format.js";
-import { RunStore } from "./run-store.js";
+import { findingsSummary } from "./format.js";
 import type {
   RunTaskDeps,
   RunTaskOptions,
   RunTaskResult,
   WorkerTargetInput,
 } from "./run-command.js";
+import { createRunExecutionSession } from "./run-session.js";
 
 const DEFAULT_DRIVER_TARGET_ID = "worker";
 
@@ -81,77 +70,16 @@ export async function runQualityTask(
   }
   const allowedWorkerTargets = preflight.workerTargets;
 
-  let repoRoot: string;
+  let session: Awaited<ReturnType<typeof createRunExecutionSession>>;
   try {
-    repoRoot = await findRepoRoot(options.repoPath);
+    session = await createRunExecutionSession(options, deps, { failedCommandSymbol: "x" });
   } catch {
     out(`error: not a git repository: ${options.repoPath}\n`);
     return { exitCode: 2, repoRoot: "", storeDir: "" };
   }
-
-  let lastVerification: VerificationResult | undefined;
-  const orchestrator = new Orchestrator({
-    workspace: {
-      createWorkspace: async (run) => {
-        const workspace = await createRunWorkspace(repoRoot, run.id);
-        return { workspacePath: workspace.path, branch: workspace.branch };
-      },
-    },
-    verification: {
-      verify: async (run) => {
-        if (run.workspacePath === undefined) {
-          throw new Error("run has no workspace");
-        }
-        lastVerification = await runVerification(options.verifyCommands, {
-          cwd: run.workspacePath,
-          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-          onCommandStart: (command) => observer?.commandStarted?.(command),
-          onCommandEnd: (command, result) => {
-            observer?.commandFinished?.(command, result);
-            const status = result.timedOut
-              ? "timed out"
-              : result.exitCode === 0
-                ? `(${formatDuration(result.durationMs)})`
-                : `exit ${result.exitCode ?? "null"}`;
-            out(
-              `  ${result.timedOut || result.exitCode !== 0 ? "x" : "✓"} ${result.name} ${status}\n`,
-            );
-          },
-        });
-        if (deps.signal?.aborted === true) {
-          throw new Error("cancelled by user");
-        }
-        return lastVerification;
-      },
-    },
-    runtimeRegistry: deps.runtimeRegistry,
-  });
-
-  const store = new RunStore(path.join(repoRoot, ".conjunction", "runs"));
-  let flushedEvents = 0;
-  let persistenceWarningShown = false;
-  const flush = async (task: Task, run: Run): Promise<void> => {
-    try {
-      await store.save({ run, task });
-      const events = orchestrator.events.all();
-      await store.appendEvents(run.id, events.slice(flushedEvents));
-      flushedEvents = events.length;
-    } catch (error) {
-      if (!persistenceWarningShown) {
-        persistenceWarningShown = true;
-        out(
-          `warning: could not persist run metadata to ${store.dir}: ` +
-            `${(error as Error).message} (run continues without it)\n`,
-        );
-      }
-    }
-  };
-
-  const throwIfAborted = (): void => {
-    if (deps.signal?.aborted === true) {
-      throw new Error("cancelled by user");
-    }
-  };
+  const { repoRoot, orchestrator, store } = session;
+  const flush = session.flush;
+  const throwIfAborted = session.throwIfAborted;
 
   const { brief } = options;
   const task = orchestrator.createTask({
@@ -282,7 +210,7 @@ export async function runQualityTask(
           const packet = buildReviewerPacket({
             task,
             diff: reviewDiff,
-            verification: (lastVerification?.results ?? []).map((result) => ({
+            verification: (session.lastVerification()?.results ?? []).map((result) => ({
               name: result.name,
               passed: !result.timedOut && result.exitCode === 0,
             })),
@@ -350,7 +278,7 @@ export async function runQualityTask(
         );
         out("\n-- worker --\n");
         try {
-          await orchestrator.invokeAgent(run.id, {
+          const workerInvoke = await orchestrator.invokeAgent(run.id, {
             role: "worker",
             instructions: workerPacket,
             target: selectedTarget.target,
@@ -365,6 +293,8 @@ export async function runQualityTask(
               out(chunk);
             },
           });
+          const afterWorkerDiff = await getDiff(run);
+          recordWorkspaceChange(workerInvoke.invocation, workerDiff, afterWorkerDiff);
         } catch (error) {
           if (error instanceof UnsupportedRuntimeCapabilityError) {
             orchestrator.failRun(run.id, error.message);
@@ -412,8 +342,9 @@ export async function runQualityTask(
   if (run.result?.error !== undefined) {
     out(`Error:     ${run.result.error}\n`);
   }
-  if (lastVerification !== undefined) {
-    out(`Verify:    ${lastVerification.passed ? "passed" : "FAILED"}\n`);
+  const latestVerification = session.lastVerification();
+  if (latestVerification !== undefined) {
+    out(`Verify:    ${latestVerification.passed ? "passed" : "FAILED"}\n`);
   }
   if (run.review !== undefined) {
     out(
@@ -427,20 +358,7 @@ export async function runQualityTask(
   const metadataPath = path.join(store.dir, `${run.id}.json`);
   out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);
 
-  let cleanupNote: string;
-  if (options.cleanup && run.workspacePath !== undefined) {
-    try {
-      await removeRunWorkspace(repoRoot, run.id);
-      cleanupNote = "worktree and branch removed";
-    } catch (error) {
-      cleanupNote =
-        error instanceof DirtyWorktreeError
-          ? `refused — worktree has uncommitted changes; preserved at ${run.workspacePath}`
-          : `failed — ${(error as Error).message}`;
-    }
-  } else {
-    cleanupNote = "worktree preserved for inspection (use --cleanup to attempt removal)";
-  }
+  const cleanupNote = await session.cleanup(run, options.cleanup);
   out(`Cleanup:   ${cleanupNote}\n`);
 
   const result: RunTaskResult = {
@@ -451,8 +369,8 @@ export async function runQualityTask(
     storeDir: store.dir,
     cleanupNote,
   };
-  if (lastVerification !== undefined) {
-    result.verification = lastVerification;
+  if (latestVerification !== undefined) {
+    result.verification = latestVerification;
   }
   return result;
 }
@@ -600,13 +518,9 @@ function progressFacts(
     (invocation) => invocation.role === "worker" && invocation.readOnly !== true,
   );
   const lastWorker = writableInvocations.at(-1);
-  const latestSignature = run.verificationHistory?.at(-1)?.failureSignature;
-  const repeatedFailureSignatureCount =
-    latestSignature === undefined || latestSignature === "passed"
-      ? 0
-      : (run.verificationHistory ?? []).filter(
-          (record) => record.failureSignature === latestSignature,
-        ).length;
+  const repeatedFailureSignatureCount = consecutiveRepeatedFailureSignatureCount(
+    run.verificationHistory ?? [],
+  );
   const lastWorkerTarget = allowedWorkerTargets.find(
     (entry) =>
       lastWorker?.target.runtime === entry.target.runtime &&
@@ -620,8 +534,46 @@ function progressFacts(
     ...(lastWorker?.reasoningEffort !== undefined
       ? { lastWorkerEffort: lastWorker.reasoningEffort }
       : {}),
+    ...(lastWorker?.workspaceChange !== undefined
+      ? { lastWorkerChangedWorkspace: lastWorker.workspaceChange.changed }
+      : {}),
     worktreeChanged: diff.trim().length > 0,
   };
+}
+
+function recordWorkspaceChange(
+  invocation: NonNullable<Run["invocations"]>[number],
+  beforeDiff: string,
+  afterDiff: string,
+): void {
+  const beforeFingerprint = diffFingerprint(beforeDiff);
+  const afterFingerprint = diffFingerprint(afterDiff);
+  invocation.workspaceChange = {
+    beforeFingerprint,
+    afterFingerprint,
+    changed: beforeFingerprint !== afterFingerprint,
+  };
+}
+
+function diffFingerprint(diff: string): string {
+  return createHash("sha256").update(diff).digest("hex");
+}
+
+function consecutiveRepeatedFailureSignatureCount(
+  history: NonNullable<Run["verificationHistory"]>,
+): number {
+  const latest = history.at(-1)?.failureSignature;
+  if (latest === undefined || latest === "passed") {
+    return 0;
+  }
+  let count = 0;
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index]?.failureSignature !== latest) {
+      break;
+    }
+    count++;
+  }
+  return count;
 }
 
 function verificationIsFresh(run: Run): boolean {

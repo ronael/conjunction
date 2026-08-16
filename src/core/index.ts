@@ -13,6 +13,7 @@ export {
   type Invocation,
   type InvocationState,
   type InvocationTerminationReason,
+  type InvocationWorkspaceChange,
   type ReasoningEffort,
 } from "./invocation.js";
 export { buildWorkerInstructions } from "./instructions.js";

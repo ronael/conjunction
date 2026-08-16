@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   ExecutionTarget,
   DriverLimits,
+  Orchestrator,
   ReasoningEffort,
   Run,
   RunReview,
@@ -15,7 +16,6 @@ import {
   buildCorrectionPacket,
   buildReviewerPacket,
   isFailedVerificationResult,
-  Orchestrator,
   workflowIncludes,
 } from "../core/index.js";
 import type {
@@ -23,21 +23,12 @@ import type {
   VerificationCommand,
   VerificationResult,
 } from "../verification/index.js";
-import { runVerification } from "../verification/index.js";
-import {
-  createRunWorkspace,
-  DirtyWorktreeError,
-  findRepoRoot,
-  getCurrentBranch,
-  getHeadCommit,
-  getWorktreeDiff,
-  removeRunWorkspace,
-} from "../workspace/index.js";
+import { getCurrentBranch, getHeadCommit, getWorktreeDiff } from "../workspace/index.js";
 
 import type { Brief } from "./brief.js";
-import { RunStore } from "./run-store.js";
 import { findingsSummary, formatDuration } from "./format.js";
 import { runQualityTask } from "./quality-workflow.js";
+import { createRunExecutionSession } from "./run-session.js";
 
 /** Daytona-style checklist line for plain output: "✓ Workspace ready    <detail>". */
 function stepLine(symbol: string, label: string, detail?: string): string {
@@ -221,85 +212,16 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     }
   }
 
-  let repoRoot: string;
+  let session: Awaited<ReturnType<typeof createRunExecutionSession>>;
   try {
-    repoRoot = await findRepoRoot(options.repoPath);
+    session = await createRunExecutionSession(options, deps);
   } catch {
     out(`error: not a git repository: ${options.repoPath}\n`);
     return { exitCode: 2, repoRoot: "", storeDir: "" };
   }
-
-  let lastVerification: VerificationResult | undefined;
-  const orchestrator = new Orchestrator({
-    workspace: {
-      createWorkspace: async (run) => {
-        const workspace = await createRunWorkspace(repoRoot, run.id);
-        return { workspacePath: workspace.path, branch: workspace.branch };
-      },
-    },
-    verification: {
-      verify: async (run) => {
-        if (run.workspacePath === undefined) {
-          throw new Error("run has no workspace");
-        }
-        lastVerification = await runVerification(options.verifyCommands, {
-          cwd: run.workspacePath,
-          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-          onCommandStart: (command) => observer?.commandStarted?.(command),
-          onCommandEnd: (command, result) => {
-            observer?.commandFinished?.(command, result);
-            const status = result.timedOut
-              ? "timed out"
-              : result.exitCode === 0
-                ? `(${formatDuration(result.durationMs)})`
-                : `exit ${result.exitCode ?? "null"}`;
-            out(
-              `  ${result.timedOut || result.exitCode !== 0 ? "✗" : "✓"} ${result.name} ${status}\n`,
-            );
-          },
-        });
-        // An abort mid-verification must surface as a CANCELLED run, not a
-        // verification failure: throw so verifyRun never transitions and the
-        // catch below can cancel from "verifying".
-        if (deps.signal?.aborted === true) {
-          throw new Error("cancelled by user");
-        }
-        return lastVerification;
-      },
-    },
-    runtimeRegistry: deps.runtimeRegistry,
-  });
-
-  const store = new RunStore(path.join(repoRoot, ".conjunction", "runs"));
-  let flushedEvents = 0;
-  let persistenceWarningShown = false;
-  /**
-   * Persistence is best-effort: a failing .conjunction/runs dir must not kill
-   * the run itself. Warn once, then keep going (degrade cleanly).
-   */
-  const flush = async (task: Task, run: Run): Promise<void> => {
-    try {
-      await store.save({ run, task });
-      const events = orchestrator.events.all();
-      await store.appendEvents(run.id, events.slice(flushedEvents));
-      flushedEvents = events.length;
-    } catch (error) {
-      if (!persistenceWarningShown) {
-        persistenceWarningShown = true;
-        out(
-          `warning: could not persist run metadata to ${store.dir}: ` +
-            `${(error as Error).message} (run continues without it)\n`,
-        );
-      }
-    }
-  };
-
-  /** Throw before starting a new phase when the user already cancelled. */
-  const throwIfAborted = (): void => {
-    if (deps.signal?.aborted === true) {
-      throw new Error("cancelled by user");
-    }
-  };
+  const { repoRoot, orchestrator, store } = session;
+  const flush = session.flush;
+  const throwIfAborted = session.throwIfAborted;
 
   const { brief } = options;
   const task = orchestrator.createTask({
@@ -372,10 +294,11 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
 
       // Lot 6: one bounded correction attempt against the same worktree.
       // (cast: verifyRun mutates run.state past the narrowing above)
-      if ((run.state as RunState) === "correcting" && lastVerification !== undefined) {
-        const failedResults = lastVerification.results.filter(isFailedVerificationResult);
+      const correctionVerification = session.lastVerification();
+      if ((run.state as RunState) === "correcting" && correctionVerification !== undefined) {
+        const failedResults = correctionVerification.results.filter(isFailedVerificationResult);
         const failedNames = failedResults.map((result) => result.name);
-        const passedNames = lastVerification.results
+        const passedNames = correctionVerification.results
           .filter((result) => !result.timedOut && result.exitCode === 0)
           .map((result) => result.name);
         const packet = buildCorrectionPacket(
@@ -427,7 +350,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       const packet = buildReviewerPacket({
         task,
         diff,
-        verification: (lastVerification?.results ?? []).map((result) => ({
+        verification: (session.lastVerification()?.results ?? []).map((result) => ({
           name: result.name,
           passed: !result.timedOut && result.exitCode === 0,
         })),
@@ -509,11 +432,12 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   if (run.result?.error !== undefined) {
     out(`Error:     ${run.result.error}\n`);
   }
-  if (lastVerification !== undefined) {
-    if (lastVerification.results.length === 0) {
+  const latestVerification = session.lastVerification();
+  if (latestVerification !== undefined) {
+    if (latestVerification.results.length === 0) {
       out("Verify:    no verification commands configured\n");
     } else {
-      out(`Verify:    ${lastVerification.passed ? "passed" : "FAILED"}\n`);
+      out(`Verify:    ${latestVerification.passed ? "passed" : "FAILED"}\n`);
     }
   }
   if (run.review !== undefined) {
@@ -529,22 +453,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   const metadataPath = path.join(store.dir, `${run.id}.json`);
   out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);
 
-  let cleanupNote: string;
-  if (options.cleanup && run.workspacePath !== undefined) {
-    try {
-      await removeRunWorkspace(repoRoot, run.id);
-      cleanupNote = "worktree and branch removed";
-    } catch (error) {
-      if (error instanceof DirtyWorktreeError) {
-        cleanupNote =
-          "refused — worktree has uncommitted changes; " + `preserved at ${run.workspacePath}`;
-      } else {
-        cleanupNote = `failed — ${(error as Error).message}`;
-      }
-    }
-  } else {
-    cleanupNote = "worktree preserved for inspection (use --cleanup to attempt removal)";
-  }
+  const cleanupNote = await session.cleanup(run, options.cleanup);
   out(`Cleanup:   ${cleanupNote}\n`);
 
   const result: RunTaskResult = {
@@ -555,8 +464,8 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     storeDir: store.dir,
     cleanupNote,
   };
-  if (lastVerification !== undefined) {
-    result.verification = lastVerification;
+  if (latestVerification !== undefined) {
+    result.verification = latestVerification;
   }
   return result;
 }

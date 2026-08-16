@@ -16,7 +16,6 @@ describe("Driver decision model", () => {
         targetId: "worker-b",
         objective: "finish the implementation",
         reasoningEffort: "high",
-        supersedesInvocationId: "inv-worker-a",
       }),
     );
 
@@ -28,7 +27,6 @@ describe("Driver decision model", () => {
         targetId: "worker-b",
         objective: "finish the implementation",
         reasoningEffort: "high",
-        supersedesInvocationId: "inv-worker-a",
       },
     });
     expect(DRIVER_DECISION_SCHEMA.properties.action.enum).toEqual([
@@ -56,6 +54,17 @@ describe("Driver decision model", () => {
         }),
       ),
     ).toEqual({ ok: false, error: "unknown driver decision field: terminal" });
+    expect(
+      parseDriverDecision(
+        JSON.stringify({
+          action: "delegate",
+          reason: "decorative relation",
+          targetId: "worker",
+          objective: "do it",
+          supersedesInvocationId: "inv-worker-a",
+        }),
+      ),
+    ).toEqual({ ok: false, error: "unknown driver decision field: supersedesInvocationId" });
   });
 
   it("summarizes verification failures with stable signatures", () => {

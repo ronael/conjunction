@@ -238,7 +238,6 @@ describe("quality workflow", () => {
           targetId: "b",
           objective: "finish the work",
           reason: "worker A stalled; switch target",
-          supersedesInvocationId: "previous-worker",
         },
         { action: "verify", reason: "verify final output" },
         { action: "accept", reason: "green after switch" },
@@ -276,6 +275,51 @@ describe("quality workflow", () => {
         )
         .map((event) => event.type),
     ).toEqual(["agent.started", "agent.completed", "agent.started", "agent.completed"]);
+  });
+
+  it("records whether each writable worker changed the workspace for the next Driver context", async () => {
+    const scenario = await runQuality({
+      decisions: [
+        {
+          action: "delegate",
+          targetId: "a",
+          objective: "create a partial file",
+          reason: "first worker should change the worktree",
+        },
+        {
+          action: "delegate",
+          targetId: "b",
+          objective: "inspect but do not change anything",
+          reason: "second worker is expected to make no filesystem progress",
+        },
+        { action: "stop", reason: "enough facts for the test" },
+      ],
+      workerTargets: [
+        { id: "a", target: { runtime: "worker-a" } },
+        { id: "b", target: { runtime: "worker-b" } },
+      ],
+      workers: {
+        "worker-a": async (input) => {
+          await writeFile(path.join(input.workspacePath, "partial.txt"), "partial\n");
+        },
+        "worker-b": async () => {},
+      },
+    });
+
+    const workerInvocations =
+      scenario.run.invocations?.filter((invocation) => invocation.role === "worker") ?? [];
+    expect(workerInvocations.map((invocation) => invocation.workspaceChange?.changed)).toEqual([
+      true,
+      false,
+    ]);
+
+    const facts = driverFacts(scenario.driverInputs[2]?.instructions ?? "");
+    expect(facts.progress.lastWorkerChangedWorkspace).toBe(false);
+    expect(
+      facts.invocations
+        .filter((invocation: { role: string }) => invocation.role === "worker")
+        .map((invocation: { workspaceChanged?: boolean }) => invocation.workspaceChanged),
+    ).toEqual([true, false]);
   });
 
   it("retry and effort escalation are represented as new delegations", async () => {
@@ -355,6 +399,50 @@ describe("quality workflow", () => {
     });
     expect(missing.run.state).toBe("failed");
     expect(missing.run.result?.error).toBe("driver accept refused: verification is missing");
+  });
+
+  it("counts repeated verification failure signatures only when consecutive", async () => {
+    const repeated = await runQuality({
+      decisions: [
+        { action: "verify", reason: "first red" },
+        { action: "verify", reason: "same red again" },
+        { action: "stop", reason: "inspect progress facts" },
+      ],
+      workers: { worker: async () => {} },
+    });
+    expect(driverFacts(repeated.driverInputs[2]?.instructions ?? "").progress).toMatchObject({
+      repeatedFailureSignatureCount: 2,
+    });
+
+    const alternating = await runQuality({
+      decisions: [
+        { action: "delegate", targetId: "worker", objective: "write A", reason: "A" },
+        { action: "verify", reason: "verify A" },
+        { action: "delegate", targetId: "worker", objective: "write B", reason: "B" },
+        { action: "verify", reason: "verify B" },
+        { action: "delegate", targetId: "worker", objective: "write A again", reason: "A again" },
+        { action: "verify", reason: "verify A again" },
+        { action: "stop", reason: "inspect alternating progress facts" },
+      ],
+      workers: {
+        worker: async (input, callIndex) => {
+          await writeFile(path.join(input.workspacePath, "mode.txt"), callIndex === 1 ? "b" : "a");
+        },
+      },
+      verifyCommands: [
+        {
+          name: "mode check",
+          command: "sh",
+          args: [
+            "-c",
+            "case $(cat mode.txt 2>/dev/null) in a) exit 1;; b) exit 2;; *) exit 3;; esac",
+          ],
+        },
+      ],
+    });
+    expect(driverFacts(alternating.driverInputs[6]?.instructions ?? "").progress).toMatchObject({
+      repeatedFailureSignatureCount: 1,
+    });
   });
 
   it("Driver stop and max decisions fail explicitly", async () => {
@@ -465,3 +553,21 @@ describe("quality workflow", () => {
     expect(stored.run.landed).toBeDefined();
   });
 });
+
+function driverFacts(instructions: string): {
+  progress: {
+    lastWorkerChangedWorkspace?: boolean;
+    repeatedFailureSignatureCount: number;
+  };
+  invocations: Array<{ role: string; workspaceChanged?: boolean }>;
+} {
+  const match = instructions.match(/## Structured facts\n```json\n([\s\S]*?)\n```/);
+  expect(match?.[1]).toBeDefined();
+  return JSON.parse(match?.[1] ?? "{}") as {
+    progress: {
+      lastWorkerChangedWorkspace?: boolean;
+      repeatedFailureSignatureCount: number;
+    };
+    invocations: Array<{ role: string; workspaceChanged?: boolean }>;
+  };
+}

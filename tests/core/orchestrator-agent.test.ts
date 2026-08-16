@@ -242,3 +242,118 @@ describe("Orchestrator.executeRun", () => {
     );
   });
 });
+
+describe("Orchestrator.invokeAgent role read-only invariants", () => {
+  it("runs driver invocations read-only even when readOnly is omitted", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, { lastMessage: "{}" });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.invokeAgent(run.id, {
+      role: "driver",
+      instructions: "decide",
+      timeoutMs: 1_000,
+      outputSchema: { type: "object" },
+    });
+
+    expect(inputs[0]?.readOnly).toBe(true);
+    expect(run.invocations?.[0]).toMatchObject({ role: "driver", readOnly: true });
+  });
+
+  it("refuses an explicit writable driver before adapter.run", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, {});
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await expect(
+      orchestrator.invokeAgent(run.id, {
+        role: "driver",
+        instructions: "decide",
+        timeoutMs: 1_000,
+        readOnly: false,
+      } as unknown as Parameters<Orchestrator["invokeAgent"]>[1]),
+    ).rejects.toThrow(/driver invocations are always read-only/);
+
+    expect(inputs).toHaveLength(0);
+    expect(run.invocations).toHaveLength(0);
+  });
+
+  it("runs critic invocations read-only even when readOnly is omitted", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, { lastMessage: "{}" });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.invokeAgent(run.id, {
+      role: "critic",
+      instructions: "review",
+      timeoutMs: 1_000,
+      outputSchema: { type: "object" },
+    });
+
+    expect(inputs[0]?.readOnly).toBe(true);
+    expect(run.invocations?.[0]).toMatchObject({ role: "critic", readOnly: true });
+  });
+
+  it("refuses driver execution on a runtime that cannot enforce read-only", async () => {
+    const { adapter, inputs } = stubAgent(
+      () => {},
+      {},
+      { readOnly: false, structuredOutput: true, reasoningEffort: [] },
+    );
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await expect(
+      orchestrator.invokeAgent(run.id, {
+        role: "driver",
+        instructions: "decide",
+        timeoutMs: 1_000,
+        outputSchema: { type: "object" },
+      }),
+    ).rejects.toThrow(UnsupportedRuntimeCapabilityError);
+
+    expect(inputs).toHaveLength(0);
+    expect(run.invocations).toHaveLength(0);
+  });
+
+  it("keeps normal worker invocations writable by default", async () => {
+    const { adapter, inputs } = stubAgent(() => {}, { lastMessage: "done" });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+
+    await orchestrator.invokeAgent(run.id, {
+      role: "worker",
+      instructions: "write",
+      timeoutMs: 1_000,
+    });
+
+    expect(inputs[0]?.readOnly).toBeUndefined();
+    expect(run.invocations?.[0]).toMatchObject({ role: "worker" });
+    expect(run.invocations?.[0]?.readOnly).toBeUndefined();
+  });
+});
