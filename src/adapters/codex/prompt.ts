@@ -1,4 +1,4 @@
-import type { Task } from "../../core/index.js";
+import { objectiveSection, type Task } from "../../core/index.js";
 
 /**
  * Deterministic prompt built from a Task. No model-specific cleverness: the
@@ -9,8 +9,7 @@ export function buildPrompt(task: Task): string {
     "You are executing a task inside an isolated git worktree managed by Conjunction,",
     "an orchestration runtime for coding agents.",
     "",
-    "## Objective",
-    task.objective,
+    ...objectiveSection(task),
     "",
     "## Constraints",
     ...(task.constraints.length > 0

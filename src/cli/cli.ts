@@ -1,8 +1,10 @@
 import { CodexAdapter } from "../adapters/codex/index.js";
-import type { AgentAdapter } from "../core/index.js";
+import type { AgentAdapter, WorkflowName } from "../core/index.js";
+import { DEFAULT_WORKFLOW, isWorkflowName, WORKFLOW_NAMES, WORKFLOWS } from "../core/index.js";
 import type { VerificationCommand } from "../verification/index.js";
 
 import { parseArgs, UsageError } from "./args.js";
+import { BriefError, resolveBrief } from "./brief.js";
 import { doctorCommand } from "./doctor-command.js";
 import { runTask } from "./run-command.js";
 import { statusCommand } from "./status-command.js";
@@ -12,7 +14,9 @@ const DEFAULT_TIMEOUT_MINUTES = 10;
 const USAGE = `conjunction — orchestration runtime for coding agents
 
 usage:
-  conjunction run "<task>" [--repo <path>] [--verify "<cmd> [args...]"]...
+  conjunction run "<task>" | <brief.md> | --brief <file>
+                           [--workflow ${WORKFLOW_NAMES.join("|")}]
+                           [--repo <path>] [--verify "<cmd> [args...]"]...
                            [--timeout <minutes>] [--model <model>] [--cleanup]
                            [--plain] [--no-correct] [--review]
   conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
@@ -20,17 +24,25 @@ usage:
   conjunction doctor
 
 commands:
-  run      execute a task in an isolated git worktree via the codex adapter
+  run      execute a brief in an isolated git worktree via the codex adapter
   land     apply a completed run's changes onto your branch (uncommitted)
   status   list runs recorded under .conjunction/runs/
   doctor   check that the agent runtime (codex cli) is available
 
+workflows (--workflow, default: ${DEFAULT_WORKFLOW}):
+${WORKFLOW_NAMES.map((name) => `  ${name.padEnd(8)} ${WORKFLOWS[name].description}`).join("\n")}
+
 notes:
+  a lone positional is read as a brief FILE when it looks like a path
+  (./x, ../x, /x, ~/x, or *.md/*.markdown/*.txt); otherwise it is the task
+  text. --brief <file> is the explicit form and never guesses.
   --verify splits on whitespace; quote the whole command, not its arguments.
   failed verification triggers ONE correction attempt (same worker, bounded
   packet) then a re-check; --no-correct disables it. No --verify, no correction.
-  --review runs an independent READ-ONLY reviewer after verification passes;
-  findings are advisory and never change the exit code.
+  Correction belongs to every workflow — it is the worker responding to
+  deterministic feedback, not a separate role.
+  --review is an alias for --workflow review (independent READ-ONLY critic
+  after verification passes); findings are advisory and never change the exit code.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
   Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
@@ -54,31 +66,39 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
     switch (command) {
       case "run": {
         const parsed = parseArgs(rest, {
-          valueOptions: ["repo", "verify", "timeout", "model"],
+          valueOptions: ["repo", "verify", "timeout", "model", "brief", "workflow"],
           flags: ["cleanup", "help", "plain", "no-correct", "review"],
         });
         if (parsed.flags.has("help")) {
           out(USAGE);
           return 0;
         }
-        const description = parsed.positionals.join(" ").trim();
-        if (description.length === 0) {
-          throw new UsageError("run requires a task description");
-        }
+        const workflow = resolveWorkflowOption(
+          parsed.options.workflow?.at(-1),
+          parsed.flags.has("review"),
+        );
+        const briefOption = parsed.options.brief?.at(-1);
+        const brief = await resolveBrief(
+          {
+            positionals: parsed.positionals,
+            ...(briefOption !== undefined ? { briefOption } : {}),
+          },
+          process.cwd(),
+        );
         const timeoutMinutes = parseTimeout(parsed.options.timeout?.at(-1));
         const model = parsed.options.model?.at(-1);
         const adapter =
           deps.adapter ?? new CodexAdapter(model !== undefined ? { model } : undefined);
         const verifyCommands = (parsed.options.verify ?? []).map(parseVerifyCommand);
         const runOptions = {
-          description,
+          brief,
+          workflow,
           repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
           verifyCommands,
           timeoutMinutes,
           cleanup: parsed.flags.has("cleanup"),
           // correction only makes sense with something to correct against
           correct: verifyCommands.length > 0 && !parsed.flags.has("no-correct"),
-          review: parsed.flags.has("review"),
         };
 
         // The TUI only takes over a real terminal the user is watching; tests
@@ -162,9 +182,35 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
       out(`error: ${error.message}\n\n${USAGE}`);
       return 2;
     }
+    // A bad brief is a setup error like "not a git repository": exit 2, and
+    // without the usage dump, which would bury the actual filesystem problem.
+    if (error instanceof BriefError) {
+      out(`error: ${error.message}\n`);
+      return 2;
+    }
     out(`error: ${(error as Error).message}\n`);
     return 1;
   }
+}
+
+/**
+ * `--workflow <name>`, with `--review` kept as an alias for `--workflow review`.
+ * Disagreement between the two is an error rather than a silent precedence
+ * rule (see docs/brief-workflow-design.md §5.3).
+ */
+function resolveWorkflowOption(raw: string | undefined, reviewFlag: boolean): WorkflowName {
+  if (raw === undefined) {
+    return reviewFlag ? "review" : DEFAULT_WORKFLOW;
+  }
+  if (!isWorkflowName(raw)) {
+    throw new UsageError(`unknown workflow "${raw}" (available: ${WORKFLOW_NAMES.join(", ")})`);
+  }
+  if (reviewFlag && raw !== "review") {
+    throw new UsageError(
+      `--review contradicts --workflow ${raw}; --review is an alias for --workflow review`,
+    );
+  }
+  return raw;
 }
 
 function parseTimeout(raw: string | undefined): number {

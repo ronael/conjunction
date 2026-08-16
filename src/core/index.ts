@@ -1,11 +1,24 @@
 export {
   createTask,
   InvalidTaskInputError,
+  objectiveSection,
   type Task,
   type TaskFactoryDeps,
   type TaskInput,
+  type TaskSource,
   type TaskStatus,
 } from "./task.js";
+export {
+  DEFAULT_WORKFLOW,
+  getWorkflow,
+  isWorkflowName,
+  WORKFLOW_NAMES,
+  WORKFLOWS,
+  workflowIncludes,
+  type Role,
+  type WorkflowDefinition,
+  type WorkflowName,
+} from "./workflow.js";
 export {
   type AgentAdapter,
   type AgentAvailability,

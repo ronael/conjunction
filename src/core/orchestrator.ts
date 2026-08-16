@@ -12,6 +12,7 @@ import {
   type VerificationOutcome,
 } from "./run.js";
 import { createTask, type Task, type TaskInput } from "./task.js";
+import type { WorkflowName } from "./workflow.js";
 
 /** Lot 6: hard cap on self-healing. One correction attempt per run, ever. */
 export const MAX_CORRECTIONS_PER_RUN = 1;
@@ -122,7 +123,8 @@ export class Orchestrator {
     return this.#requireRun(runId);
   }
 
-  createRun(taskId: string, runtime: string): Run {
+  /** `workflow` records which participants this run selects; see workflow.ts. */
+  createRun(taskId: string, runtime: string, workflow?: WorkflowName): Run {
     const task = this.#requireTask(taskId);
     const run: Run = {
       id: this.#createId(),
@@ -132,6 +134,9 @@ export class Orchestrator {
       state: "pending",
       attempts: [],
     };
+    if (workflow !== undefined) {
+      run.workflow = workflow;
+    }
     this.#runs.set(run.id, run);
     return run;
   }

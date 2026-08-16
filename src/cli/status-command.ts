@@ -38,6 +38,13 @@ export async function statusCommand(
       out(`   ${"Branch".padEnd(9)}${run.branch}\n`);
       out(`   ${"Worktree".padEnd(9)}${run.workspacePath ?? "-"}\n`);
     }
+    // both absent on runs recorded before brief/workflow support
+    if (run.workflow !== undefined) {
+      out(`   ${"Workflow".padEnd(9)}${run.workflow}\n`);
+    }
+    if (task.source?.kind === "file") {
+      out(`   ${"Brief".padEnd(9)}${task.source.path}\n`);
+    }
   }
   return 0;
 }

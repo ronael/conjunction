@@ -22,11 +22,11 @@ $ node dist/cli/main.js doctor
 agent runtime "codex-cli": available (codex-cli 0.144.1)
 ```
 
-### `conjunction run "<task>"`
+### `conjunction run "<task>" | <brief.md> | --brief <file>`
 
-Executes one task end-to-end:
+Executes one brief end-to-end:
 
-1. builds a `Task` from the description;
+1. builds a `Task` from the brief (inline description or file);
 2. creates branch `conjunction/<runId>` and a worktree at
    `<repoRoot>/.conjunction/worktrees/<runId>`;
 3. runs the codex agent sandboxed (`workspace-write`) inside the worktree,
@@ -35,15 +35,83 @@ Executes one task end-to-end:
 5. prints a summary and preserves the worktree for inspection.
 
 ```bash
+# inline description (unchanged)
 conjunction run "create a file hello.txt containing the text hello conjunction" \
   --repo /path/to/repo \
   --verify "pnpm exec tsc --noEmit" \
   --verify "pnpm test" \
   --timeout 10
+
+# brief file
+conjunction run examples/chessquest/brief.md --workflow single
+conjunction run examples/chessquest/brief.md --workflow review
+
+# explicit form (never guesses)
+conjunction run --brief ./briefs/chessquest.md --workflow review
+```
+
+## Briefs
+
+A brief is the run's **source of truth**. It can be an inline description or a
+file — usually Markdown, but any UTF-8 text file works.
+
+The file's content is used **verbatim**: Conjunction does not parse your
+headings, and `## Constraints` / `## Acceptance Criteria` carry no special
+meaning. The whole document is what every role sees, so nothing is lost to a
+parser. (Rationale, and the trigger for revisiting this, are in
+`docs/brief-workflow-design.md` §4.1.)
+
+**How a positional argument is interpreted.** A single positional is read as a
+brief **file** when it looks like a path — it starts with `./`, `../`, `/` or
+`~/`, or it has no spaces and ends in `.md`, `.markdown` or `.txt`. Anything
+else is an inline description. If it looks like a path and the file is missing,
+the run fails (exit 2) rather than silently treating your typo as a task.
+`--brief <file>` is always a file and never guesses; passing both `--brief` and
+a description is an error.
+
+Limits and errors (all exit 2, before any agent runs):
+
+- file missing, path is a directory, file empty or whitespace-only;
+- larger than 256 KiB;
+- not UTF-8 text (contains a NUL byte). A leading BOM is stripped;
+- relative paths resolve against your **current directory**, not `--repo`.
+
+What gets recorded: the brief's full text as `task.objective`, and its absolute
+path as `task.source` in `.conjunction/runs/<runId>.json`. The run record stays
+readable even if the brief file is later edited or deleted. Runs recorded before
+brief support have no `task.source` and keep working.
+
+## Workflows
+
+`--workflow` names which participants take part in a run. It adds no new
+capability — it names combinations that already existed as flags.
+
+| Workflow           | Roles          | Pipeline                                                                    |
+| ------------------ | -------------- | --------------------------------------------------------------------------- |
+| `single` (default) | worker         | worker → verification → (bounded correction)                                |
+| `review`           | worker, critic | worker → verification → (bounded correction) → independent read-only critic |
+
+- `--review` is kept as an alias for `--workflow review`. Contradicting the two
+  (`--workflow single --review`) is an error, not a silent winner.
+- An unknown workflow is a usage error that lists the available names.
+- **Correction is part of every workflow.** It is the same worker responding to
+  deterministic feedback, not a separate role, so `--no-correct` is an
+  orthogonal modifier rather than a workflow of its own.
+
+`run.workflow` is recorded in the run JSON so two workflows can be compared on
+the same brief:
+
+```bash
+conjunction run examples/chessquest/brief.md --workflow single
+conjunction run examples/chessquest/brief.md --workflow review
+conjunction status   # both runs, with their workflow and brief
 ```
 
 Options:
 
+- `--brief <file>` — read the brief from a file (explicit form).
+- `--workflow <single|review>` — which participants take part (default:
+  `single`).
 - `--repo <path>` — any path inside the target git repo (default: cwd).
 - `--verify "<cmd> [args...]"` — repeatable deterministic check, run in the
   worktree. Splits on whitespace; quote the whole command, not its arguments.
@@ -54,7 +122,7 @@ Options:
   is refused (and the worktree preserved) when it has uncommitted changes.
 - `--plain` — force plain text output (no TUI), same as piping/CI behavior.
 - `--no-correct` — disable the correction loop (see below).
-- `--review` — after the final verification passes, run an independent
+- `--review` — alias for `--workflow review`: after the final verification passes, run an independent
   READ-ONLY reviewer (a second agent invocation against the same worktree).
   Findings are structured (`critical`/`major`/`minor`/`nit` + path +
   suggestion), advisory only — they never change the exit code and never
@@ -95,7 +163,9 @@ of breathing room:
 
 ```
 ╭────────────────────────────────────────────╮
-│  Task      add a dark-mode toggle          │
+│  Task      ChessQuest                      │
+│  Brief     examples/chessquest/brief.md    │
+│  Workflow  review                          │
 │  Run       a1b2c3d4                        │
 │  Branch    conjunction/a1b2c3d4            │
 │  Worktree  …/.conjunction/worktrees/a1b2…  │
@@ -111,7 +181,8 @@ of breathing room:
 elapsed 01:23 · q / Ctrl-C: cancel · ↑/↓: scroll
 ```
 
-- Info box: run metadata (task, run, branch, worktree, verify commands).
+- Info box: run metadata (task, brief and workflow when set, run, branch,
+  worktree, verify commands).
 - Checklist: one step per phase — workspace, agent (per attempt),
   verification (per round), correction (only if it happens). Done = green ✓
   with a dim detail (branch, duration), active = spinner, failed = red ✗ with
@@ -226,18 +297,24 @@ Lists recorded runs (newest first):
 
 ```bash
 $ node dist/cli/main.js status --repo /path/to/repo
-✓ bfa1b6a3  COMPLETED  codex-cli  2026-08-08T22:07:17.419Z  create a file hello.txt …
+✓ bfa1b6a3  COMPLETED  codex-cli  2026-08-08T22:07:17.419Z  ChessQuest · 2 findings
    Branch   conjunction/bfa1b6a3-…
    Worktree /path/to/repo/.conjunction/worktrees/bfa1b6a3-…
+   Workflow review
+   Brief    /path/to/repo/examples/chessquest/brief.md
 ```
+
+`Workflow` and `Brief` are omitted for runs recorded before this support, and
+`Brief` is omitted for inline descriptions.
 
 ## A real example
 
 ```bash
 $ node dist/cli/main.js run "create a file hello.txt containing the text hello conjunction" \
     --repo /tmp/demo-repo --timeout 8
-run:    bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
-task:   create a file hello.txt containing the text hello conjunction
+run:      bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
+task:     create a file hello.txt containing the text hello conjunction
+workflow: single
 
 ✓ Workspace ready             conjunction/bfa1b6a3-…
   worktree: /tmp/demo-repo/.conjunction/worktrees/bfa1b6a3-…
@@ -249,6 +326,7 @@ task:   create a file hello.txt containing the text hello conjunction
 ── summary ──
 State:     COMPLETED
 Task:      create a file hello.txt containing the text hello conjunction
+Workflow:  single
 Run:       bfa1b6a3-b790-442a-aa1f-ff98116e1fbf
 Attempts:  1
 Branch:    conjunction/bfa1b6a3-…

@@ -1,4 +1,4 @@
-import type { Task } from "./task.js";
+import { objectiveSection, type Task } from "./task.js";
 
 /** One failed verification command, with the output needed to diagnose it. */
 export interface FailedCommandReport {
@@ -48,8 +48,7 @@ export function buildCorrectionPacket(
     "Conjunction. Your PREVIOUS attempt in this worktree FAILED verification.",
     "Fix the failures below; do not redo work that already succeeded.",
     "",
-    "## Original objective",
-    task.objective,
+    ...objectiveSection(task, "## Original objective"),
     "",
     "## Constraints",
     ...(task.constraints.length > 0

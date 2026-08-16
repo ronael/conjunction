@@ -4,8 +4,9 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { AgentAdapter, AgentRunInput, AgentRunResult } from "../../src/core/index.js";
+import type { AgentAdapter, AgentRunInput, AgentRunResult, Task } from "../../src/core/index.js";
 import { cli } from "../../src/cli/cli.js";
+import { inlineBrief } from "../../src/cli/brief.js";
 import { runTask } from "../../src/cli/run-command.js";
 import { execGit } from "../../src/workspace/index.js";
 
@@ -422,13 +423,13 @@ describe("cli run (stub adapter, real git repo)", () => {
     );
     const promise = runTask(
       {
-        description: "wait forever",
+        brief: inlineBrief("wait forever"),
+        workflow: "single" as const,
         repoPath: repo,
         verifyCommands: [],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
-        review: false,
       },
       { adapter: waitingStub, out: io.out, signal: controller.signal },
     );
@@ -460,13 +461,13 @@ describe("cli run — audit error paths", () => {
     });
     const result = await runTask(
       {
-        description: "never starts",
+        brief: inlineBrief("never starts"),
+        workflow: "single" as const,
         repoPath: repo,
         verifyCommands: [],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
-        review: false,
       },
       { adapter: countingStub, out: io.out, signal: controller.signal },
     );
@@ -487,13 +488,13 @@ describe("cli run — audit error paths", () => {
     };
     const promise = runTask(
       {
-        description: "verify gets cancelled",
+        brief: inlineBrief("verify gets cancelled"),
+        workflow: "single" as const,
         repoPath: repo,
         verifyCommands: [slowVerify],
         timeoutMinutes: 5,
         cleanup: false,
         correct: false,
-        review: false,
       },
       { adapter: fileCreatingStub, out: io.out, signal: controller.signal },
     );
@@ -768,6 +769,352 @@ describe("cli land", () => {
     expect(branches).not.toContain(`conjunction/${runId}`);
     // the landed change stays
     expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+});
+
+describe("cli run — briefs", () => {
+  const BRIEF = [
+    "# ChessQuest",
+    "",
+    "## Objective",
+    "",
+    "Teach chess to children aged 7–11.",
+    "",
+    "## Constraints",
+    "",
+    "- rules engine outside React components",
+  ].join("\n");
+
+  it("positional brief file: full content becomes the objective, path recorded", async () => {
+    const repo = await makeTempRepo();
+    const briefPath = path.join(repo, "brief.md");
+    await writeFile(briefPath, BRIEF, "utf8");
+    const io = capture();
+
+    const code = await cli(["run", briefPath, "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+
+    expect(code).toBe(0);
+    expect(io.text()).toContain("task:     ChessQuest"); // title from the # heading
+    expect(io.text()).toContain(`brief:    ${briefPath}`);
+    expect(io.text()).toContain("Workflow:  single");
+
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as {
+      run: { workflow?: string };
+      task: { title: string; objective: string; source?: { kind: string; path?: string } };
+    };
+    // the brief survives IN FULL in the run metadata
+    expect(stored.task.objective).toBe(BRIEF);
+    expect(stored.task.title).toBe("ChessQuest");
+    expect(stored.task.source).toEqual({ kind: "file", path: briefPath });
+    expect(stored.run.workflow).toBe("single");
+  });
+
+  it("--brief is equivalent to the positional form", async () => {
+    const repo = await makeTempRepo();
+    const briefPath = path.join(repo, "spec-without-extension");
+    await writeFile(briefPath, BRIEF, "utf8");
+    const io = capture();
+
+    const code = await cli(["run", "--brief", briefPath, "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+
+    expect(code).toBe(0);
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { task: { objective: string; source?: { kind: string } } };
+    expect(stored.task.objective).toBe(BRIEF);
+    expect(stored.task.source?.kind).toBe("file");
+  });
+
+  it("the worker prompt carries the brief verbatim under a Brief heading", async () => {
+    const repo = await makeTempRepo();
+    const briefPath = path.join(repo, "brief.md");
+    await writeFile(briefPath, BRIEF, "utf8");
+    // the prompt is built by the adapter, so build it the same way the real one does
+    const { buildPrompt } = await import("../../src/adapters/codex/prompt.js");
+    const io = capture();
+    let seenTask: Task | undefined;
+    const taskCapturingStub = stubAdapter(async (input) => {
+      seenTask = input.task;
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
+
+    await cli(["run", briefPath, "--repo", repo, "--plain"], {
+      adapter: taskCapturingStub,
+      out: io.out,
+    });
+
+    expect(seenTask).toBeDefined();
+    const prompt = buildPrompt(seenTask as Task);
+    expect(prompt).toContain(`## Brief (${briefPath})`);
+    expect(prompt).toContain("Teach chess to children aged 7–11.");
+    expect(prompt).toContain("- rules engine outside React components");
+    expect(prompt).not.toContain("## Objective\n# ChessQuest"); // not double-nested
+  });
+
+  it("the critic packet also carries the brief", async () => {
+    const repo = await makeTempRepo();
+    const briefPath = path.join(repo, "brief.md");
+    await writeFile(briefPath, BRIEF, "utf8");
+    const prompts: string[] = [];
+    const reviewingStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        prompts.push(input.promptOverride ?? "");
+        return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
+
+    const code = await cli(["run", briefPath, "--repo", repo, "--workflow", "review", "--plain"], {
+      adapter: reviewingStub,
+      out: capture().out,
+    });
+
+    expect(code).toBe(0);
+    expect(prompts[0]).toContain("# ChessQuest");
+    expect(prompts[0]).toContain("Teach chess to children aged 7–11.");
+  });
+
+  it("a missing brief file fails with exit 2 and never runs the agent", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    let agentCalls = 0;
+    const countingStub = stubAdapter(() => {
+      agentCalls++;
+      return Promise.resolve({});
+    });
+
+    const code = await cli(["run", "./does-not-exist.md", "--repo", repo], {
+      adapter: countingStub,
+      out: io.out,
+    });
+
+    expect(code).toBe(2);
+    expect(io.text()).toContain("brief file not found");
+    expect(io.text()).not.toContain("usage:"); // no usage dump for a filesystem problem
+    expect(agentCalls).toBe(0);
+  });
+
+  it("a directory as brief fails with exit 2", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "--brief", repo, "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(2);
+    expect(io.text()).toContain("is a directory, expected a file");
+  });
+
+  it("an empty brief file fails with exit 2", async () => {
+    const repo = await makeTempRepo();
+    await writeFile(path.join(repo, "empty.md"), "\n\n  \n", "utf8");
+    const io = capture();
+    const code = await cli(["run", path.join(repo, "empty.md"), "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(2);
+    expect(io.text()).toContain("brief file is empty");
+  });
+
+  it("a historic string task still works and records an inline source", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "fix authentication bug", "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("task:     fix authentication bug");
+    expect(io.text()).not.toContain("brief:");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { task: { objective: string; source?: { kind: string } } };
+    expect(stored.task.objective).toBe("fix authentication bug");
+    expect(stored.task.source).toEqual({ kind: "inline" });
+  });
+});
+
+describe("cli run — workflows", () => {
+  const reviewingStub = stubAdapter(async (input) => {
+    if (input.readOnly === true) {
+      return { lastMessage: JSON.stringify({ summary: "ok", findings: [] }) };
+    }
+    await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+    return {};
+  });
+
+  it("--workflow single is the default and runs no critic", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    let readOnlyCalls = 0;
+    const countingStub = stubAdapter(async (input) => {
+      if (input.readOnly === true) {
+        readOnlyCalls++;
+      }
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
+
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "single", "--plain"], {
+      adapter: countingStub,
+      out: io.out,
+    });
+
+    expect(code).toBe(0);
+    expect(readOnlyCalls).toBe(0);
+    expect(io.text()).not.toContain("── review ──");
+    expect(io.text()).toContain("Workflow:  single");
+  });
+
+  it("--workflow review runs the independent critic", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "review", "--plain"], {
+      adapter: reviewingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("── review ──");
+    expect(io.text()).toContain("Workflow:  review");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { workflow?: string; review?: unknown } };
+    expect(stored.run.workflow).toBe("review");
+    expect(stored.run.review).toBeDefined();
+  });
+
+  it("--review remains an alias for --workflow review", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "do it", "--repo", repo, "--review", "--plain"], {
+      adapter: reviewingStub,
+      out: io.out,
+    });
+    expect(code).toBe(0);
+    expect(io.text()).toContain("Workflow:  review");
+    const [runId] = await storedRunIds(repo);
+    const stored = JSON.parse(
+      await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+    ) as { run: { workflow?: string } };
+    expect(stored.run.workflow).toBe("review");
+  });
+
+  it("an unknown workflow is a usage error listing the available ones", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "quality"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(2);
+    expect(io.text()).toContain('unknown workflow "quality"');
+    expect(io.text()).toContain("available: single, review");
+  });
+
+  it("--review contradicting --workflow single is refused, not silently resolved", async () => {
+    const repo = await makeTempRepo();
+    const io = capture();
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "single", "--review"], {
+      adapter: fileCreatingStub,
+      out: io.out,
+    });
+    expect(code).toBe(2);
+    expect(io.text()).toContain("--review contradicts --workflow single");
+  });
+
+  it("correction belongs to every workflow; --no-correct is orthogonal to it", async () => {
+    const repo = await makeTempRepo();
+    let writeCalls = 0;
+    const failingStub = stubAdapter((input) => {
+      if (input.readOnly !== true) {
+        writeCalls++;
+      }
+      return Promise.resolve({});
+    });
+
+    // review workflow, verification fails: still exactly one correction attempt
+    const io = capture();
+    const code = await cli(
+      ["run", "do it", "--repo", repo, "--workflow", "review", "--verify", "false", "--plain"],
+      { adapter: failingStub, out: io.out },
+    );
+    expect(code).toBe(1);
+    expect(writeCalls).toBe(2); // initial + the single correction
+    expect(io.text()).toContain("── correction (attempt 2/2) ──");
+
+    // same workflow with --no-correct: no correction attempt at all
+    const repo2 = await makeTempRepo();
+    writeCalls = 0;
+    const io2Local = capture();
+    const code2 = await cli(
+      [
+        "run",
+        "do it",
+        "--repo",
+        repo2,
+        "--workflow",
+        "review",
+        "--verify",
+        "false",
+        "--no-correct",
+        "--plain",
+      ],
+      { adapter: failingStub, out: io2Local.out },
+    );
+    expect(code2).toBe(1);
+    expect(writeCalls).toBe(1);
+    expect(io2Local.text()).not.toContain("correction");
+  });
+
+  it("status shows the workflow and brief of a recorded run", async () => {
+    const repo = await makeTempRepo();
+    const briefPath = path.join(repo, "brief.md");
+    await writeFile(briefPath, "# Titled Brief\n\nbody\n", "utf8");
+    await cli(["run", briefPath, "--repo", repo, "--workflow", "review", "--plain"], {
+      adapter: reviewingStub,
+      out: capture().out,
+    });
+
+    const io = capture();
+    expect(await cli(["status", "--repo", repo], { out: io.out })).toBe(0);
+    expect(io.text()).toContain("Titled Brief");
+    expect(io.text()).toContain("Workflow review");
+    expect(io.text()).toContain(`Brief    ${briefPath}`);
+  });
+
+  it("status tolerates runs recorded before brief/workflow support", async () => {
+    const repo = await makeTempRepo();
+    await cli(["run", "legacy task", "--repo", repo, "--plain"], {
+      adapter: fileCreatingStub,
+      out: capture().out,
+    });
+    const [runId] = await storedRunIds(repo);
+    const jsonPath = path.join(repo, ".conjunction", "runs", `${runId}.json`);
+    const stored = JSON.parse(await readFile(jsonPath, "utf8")) as Record<string, unknown>;
+    delete (stored.run as Record<string, unknown>).workflow;
+    delete (stored.task as Record<string, unknown>).source;
+    await writeFile(jsonPath, JSON.stringify(stored, null, 2) + "\n");
+
+    const io = capture();
+    expect(await cli(["status", "--repo", repo], { out: io.out })).toBe(0);
+    expect(io.text()).toContain("legacy task");
+    expect(io.text()).not.toContain("Workflow");
+    expect(io.text()).not.toContain("Brief");
   });
 });
 

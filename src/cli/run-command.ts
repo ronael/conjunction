@@ -1,11 +1,12 @@
 import path from "node:path";
 
-import type { AgentAdapter, Run, RunReview, RunState, Task } from "../core/index.js";
+import type { AgentAdapter, Run, RunReview, RunState, Task, WorkflowName } from "../core/index.js";
 import {
   buildCorrectionPacket,
   buildReviewerPacket,
   isFailedVerificationResult,
   Orchestrator,
+  workflowIncludes,
 } from "../core/index.js";
 import type {
   CommandResult,
@@ -23,6 +24,7 @@ import {
   removeRunWorkspace,
 } from "../workspace/index.js";
 
+import type { Brief } from "./brief.js";
 import { RunStore } from "./run-store.js";
 import { findingsSummary, formatDuration } from "./format.js";
 
@@ -52,7 +54,10 @@ function agentStepLine(run: Run, label: string): string {
 }
 
 export interface RunTaskOptions {
-  description: string;
+  /** The run's source of truth: inline description or loaded brief file. */
+  brief: Brief;
+  /** Which participants take part. Correction is orthogonal (see `correct`). */
+  workflow: WorkflowName;
   repoPath: string;
   /** Empty list = no verification; the run still completes (vacuous pass). */
   verifyCommands: VerificationCommand[];
@@ -63,11 +68,6 @@ export interface RunTaskOptions {
    * same worker and re-verify. Meaningful only when verifyCommands is non-empty.
    */
   correct: boolean;
-  /**
-   * Lot 7: after the FINAL verification passes, run the independent read-only
-   * reviewer (advisory; findings never affect the exit code).
-   */
-  review: boolean;
 }
 
 /**
@@ -210,13 +210,21 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     }
   };
 
-  const title =
-    options.description.length > 80
-      ? `${options.description.slice(0, 77)}...`
-      : options.description;
-  const task = orchestrator.createTask({ title, objective: options.description });
-  const run = orchestrator.createRun(task.id, adapter.id);
-  out(`run:    ${run.id}\ntask:   ${task.title}\n\n`);
+  const { brief } = options;
+  // The critic is a workflow participant; correction is a bound on the worker
+  // and stays orthogonal (see docs/brief-workflow-design.md §5.2).
+  const review = workflowIncludes(options.workflow, "critic");
+  const task = orchestrator.createTask({
+    title: brief.title,
+    objective: brief.content,
+    source: brief.source,
+  });
+  const run = orchestrator.createRun(task.id, adapter.id, options.workflow);
+  out(`run:      ${run.id}\ntask:     ${task.title}\n`);
+  if (brief.source.kind === "file") {
+    out(`brief:    ${brief.source.path}\n`);
+  }
+  out(`workflow: ${options.workflow}\n\n`);
 
   const hasVerify = options.verifyCommands.length > 0;
   const failedVerifyNames = (): string =>
@@ -259,7 +267,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       throwIfAborted();
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
-      await orchestrator.verifyRun(run.id, { correction: options.correct, review: options.review });
+      await orchestrator.verifyRun(run.id, { correction: options.correct, review });
       observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
       await flush(task, run);
       if (hasVerify) {
@@ -305,7 +313,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
           out("\n── verification (attempt 2) ──\n");
           observer?.verificationStarted?.();
           // no correction option: the cap makes this outcome terminal
-          await orchestrator.verifyRun(run.id, { correction: false, review: options.review });
+          await orchestrator.verifyRun(run.id, { correction: false, review });
           observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
           await flush(task, run);
           out(
@@ -381,6 +389,10 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   out("\n── summary ──\n");
   out(`State:     ${run.state.toUpperCase()}\n`);
   out(`Task:      ${task.title}\n`);
+  if (brief.source.kind === "file") {
+    out(`Brief:     ${brief.source.path}\n`);
+  }
+  out(`Workflow:  ${options.workflow}\n`);
   out(`Run:       ${run.id}\n`);
   if (run.attempts.length > 0) {
     out(

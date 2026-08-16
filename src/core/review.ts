@@ -1,4 +1,4 @@
-import type { Task } from "./task.js";
+import { objectiveSection, type Task } from "./task.js";
 
 /**
  * Lot 7 — independent reviewer.
@@ -162,8 +162,7 @@ export function buildReviewerPacket(input: {
     "git worktree managed by Conjunction. You did NOT write this code.",
     "Review only: do not modify, create, or delete any files.",
     "",
-    "## Objective",
-    task.objective,
+    ...objectiveSection(task),
     "",
     "## Constraints",
     ...(task.constraints.length > 0

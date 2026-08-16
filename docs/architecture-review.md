@@ -86,7 +86,9 @@ strict dependency direction enforced by convention:
 
 ## Not implemented yet (explicit)
 
-- Multi-agent orchestration, planner, scheduler, message bus.
+- Multi-agent orchestration, planner, scheduler, message bus. The role/workflow
+  vocabulary exists (`src/core/workflow.ts`) but there is no `lead` role and no
+  Supervisor; `docs/brief-workflow-design.md` §8 specifies the next slice.
 - Additional agent adapters (claude-code, opencode, …); only codex exists.
 - Landing changes (committing/merging a run's worktree diff to the user's branch).
 - Configuration file (`conjunction.toml` or similar) — verification commands are
@@ -236,6 +238,46 @@ run — it cancels it.
 Findings persist on the run (`run.review: { summary, findings, structured,
 completedAt, agentResult, error? }`) and counts flow through the
 `review.started` / `review.completed` events.
+
+## Briefs, workflows and roles (as implemented)
+
+Full decision record: `docs/brief-workflow-design.md`. Summary of what changed
+in the architecture:
+
+- **Task input is now a brief.** `conjunction run ./brief.md`,
+  `--brief <file>`, or the historic inline string. The brief's text is used
+  **verbatim** as `task.objective` — there is no markdown parser, on purpose
+  (heading names are a convention, not a contract, and nothing consumes
+  structured fields yet; see §4.1 of the design doc).
+- **`Task.source?: TaskSource`** (`{kind:"inline"} | {kind:"file";path}`) —
+  provenance only, optional because runs recorded earlier have none. The brief
+  content is not stored twice: `task.objective` is what actually reached the
+  prompts.
+- **`src/core/workflow.ts`** introduces the role vocabulary: `Role`
+  (`worker | critic`), `WorkflowName` (`single | review`), and a hard-coded
+  `WORKFLOWS` table. `lead` is deliberately absent — no producer emits it.
+  Core owns the vocabulary; `src/cli/run-command.ts` keeps owning the phase
+  sequence and now derives `review` from `workflowIncludes(workflow, "critic")`.
+- **`Run.workflow?: WorkflowName`** persisted, optional for older runs.
+- **Correction is not a workflow and not a role** — it is the worker responding
+  to deterministic feedback, so it belongs to every workflow and `--no-correct`
+  stays orthogonal.
+- **Brief loading lives in `src/cli/brief.ts`**, the composition root, next to
+  the other input resolution (`--verify`, `--repo`). Core stays I/O-free; a test
+  in `tests/core/workflow.test.ts` now enforces that (no adapter/UI imports, no
+  `node:fs`/`child_process`/`http` in core).
+- **`objectiveSection()`** in `src/core/task.ts` single-sources how a brief is
+  framed in the three packets (worker prompt, correction, reviewer): a
+  file-sourced brief is announced as `## Brief (<path>)` instead of being nested
+  under `## Objective`, so the brief's own headings don't collide.
+
+Deliberately NOT built (specified in the design doc instead): `RoleAssignment`
+(role → runtime → model), `ContextPacket`, `Plan`/`Subtask`/`SubtaskResult`/
+`SupervisorDecision`, a `WorkflowExecutor` extraction, a workflow DSL, and the
+Supervisor itself.
+
+`examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
+identical input. Conjunction does not build that application.
 
 ## TUI (Ink) — dependency decision
 

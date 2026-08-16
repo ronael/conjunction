@@ -1,8 +1,10 @@
 # Conjunction — Repository Agent Instructions
 
 These rules apply to coding agents working in this repository. See
-`conjunction-handoff/` for the product vision and `docs/architecture-review.md`
-for the current architecture and what is deliberately not built yet.
+`conjunction-handoff/` for the product vision, `docs/architecture-review.md`
+for the current architecture and what is deliberately not built yet, and
+`docs/brief-workflow-design.md` for the brief/workflow/role model and the
+proposed (unimplemented) Supervisor v0.
 
 ## Working style
 
@@ -13,7 +15,12 @@ for the current architecture and what is deliberately not built yet.
   can't the standard library handle it, does it couple core to a specific agent, and
   will removing it later be expensive?
 - Keep runtime-specific (Codex, Claude Code, …) logic out of `src/core/`. Agents are
-  adapters behind narrow interfaces.
+  adapters behind narrow interfaces. Core names **roles** (`worker`, `critic`, …),
+  never providers; never confuse Role (what it is for), Runtime (how it is executed)
+  and Model (which AI). No `CodexWorker`/`ClaudeReviewer` types, ever.
+- The brief is the run's source of truth and is kept verbatim in `task.objective`.
+  Do not add a markdown parser that extracts headings into `Task` fields — see
+  `docs/brief-workflow-design.md` §4.1 for the reasoning and the trigger to revisit.
 - Favor deterministic behavior for verification and state transitions.
 - Do not implement speculative multi-agent features while the single-agent loop is
   unfinished. No database.
@@ -30,7 +37,10 @@ for the current architecture and what is deliberately not built yet.
   `AgentAdapter`. They may import core types; only `src/cli/` wires them in.
   Adapters report process outcome only — never pass/fail judgments.
 - `src/cli/` is the composition root: it wires core + workspace + verification +
-  the adapter and owns run persistence (`.conjunction/runs/*.json` + JSONL events).
+  the adapter, resolves user input (briefs, `--verify`, `--repo`), owns the run
+  phase sequence (`run-command.ts`) and run persistence (run JSON plus JSONL
+  events under `.conjunction/runs/`). Core stays I/O-free —
+  `tests/core/workflow.test.ts` enforces it.
 - `src/cli/ui/` (the TUI) is a leaf consumer: it reads run/task objects and the
   `RunObserver` seams only. The engine must never know it exists; keep it
   loadable via dynamic import so plain/CI mode never pulls in ink/react.

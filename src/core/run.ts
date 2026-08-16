@@ -1,4 +1,5 @@
 import type { ReviewFinding } from "./review.js";
+import type { WorkflowName } from "./workflow.js";
 
 /**
  * Run lifecycle states.
@@ -150,6 +151,11 @@ export interface Run {
   readonly taskId: string;
   /** Free-form runtime identifier (e.g. "codex-cli"). */
   runtime: string;
+  /**
+   * Which participants took part. Absent on runs recorded before workflow
+   * support — those behaved as "single" unless `run.review` is set.
+   */
+  workflow?: WorkflowName;
   workspacePath?: string;
   branch?: string;
   readonly createdAt: string;

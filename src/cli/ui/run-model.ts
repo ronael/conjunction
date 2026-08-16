@@ -47,6 +47,9 @@ export class RunModel {
   branch = "";
   worktreePath = "";
   storeDir = "";
+  /** Brief file path; empty for an inline (command-line) description. */
+  briefPath = "";
+  workflow = "";
 
   phase: RunPhase = "setup";
   readonly startedAt = Date.now();
@@ -111,6 +114,8 @@ export class RunModel {
     this.branch = ctx.run.branch ?? "";
     this.worktreePath = ctx.run.workspacePath ?? "";
     this.storeDir = ctx.storeDir;
+    this.briefPath = ctx.task.source?.kind === "file" ? ctx.task.source.path : "";
+    this.workflow = ctx.run.workflow ?? "";
     this.phase = "agent";
 
     this.#completeStep("workspace", this.branch);

@@ -120,6 +120,8 @@ function InfoBox({ model, width }: { model: RunModel; width: number }) {
   return (
     <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
       <Kv k="Task" v={truncate(model.taskTitle, width - 20)} />
+      {model.briefPath.length > 0 && <Kv k="Brief" v={truncate(model.briefPath, width - 20)} />}
+      {model.workflow.length > 0 && <Kv k="Workflow" v={model.workflow} />}
       <Kv k="Run" v={shortId(model.runId)} />
       <Kv k="Branch" v={model.branch} />
       <Kv k="Worktree" v={model.worktreePath} />
