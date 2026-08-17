@@ -1,5 +1,7 @@
 import type { ReviewFinding } from "./review.js";
 import type { DriverDecisionRecord, DriverRunConfig } from "./driver.js";
+import type { ObserverFinding } from "./observer.js";
+import type { AgentRuntimeUsage } from "./agent.js";
 import type { ExecutionTarget, Invocation } from "./invocation.js";
 import type { WorkflowName } from "./workflow.js";
 
@@ -115,6 +117,7 @@ export interface AgentAttemptOutcome {
   timedOut: boolean;
   aborted: boolean;
   summary?: string;
+  usage?: AgentRuntimeUsage;
 }
 
 /** Lot 7: outcome of the independent, read-only reviewer invocation. */
@@ -126,6 +129,16 @@ export interface RunReview {
   completedAt: string;
   agentResult: AgentAttemptOutcome;
   /** Set when the reviewer invocation itself failed — advisory, run unaffected. */
+  error?: string;
+}
+
+/** Advisory Observer result. It interprets facts but never changes run outcome. */
+export interface RunObserverReport {
+  summary: string;
+  findings: ObserverFinding[];
+  structured: boolean;
+  completedAt: string;
+  agentResult: AgentAttemptOutcome;
   error?: string;
 }
 
@@ -192,6 +205,8 @@ export interface Run {
   verificationResult?: VerificationOutcome;
   /** Lot 7: independent reviewer outcome (advisory; only when --review). */
   review?: RunReview;
+  /** Lot 4: optional post-run observer interpretation (advisory). */
+  observer?: RunObserverReport;
   /**
    * The branch/commit the user had checked out when the run started —
    * the landing target. Missing in runs recorded before landing support.

@@ -34,6 +34,8 @@ export {
   type AgentCapabilities,
   type AgentRunInput,
   type AgentRunResult,
+  type AgentRuntimeUsage,
+  type AgentTokenUsage,
   StaticRuntimeRegistry,
   type RuntimeRegistry,
 } from "./agent.js";
@@ -49,6 +51,7 @@ export {
   type Run,
   type RunResult,
   type RunReview,
+  type RunObserverReport,
   type RunState,
   type VerificationOutcome,
   type VerificationRecord,
@@ -69,6 +72,22 @@ export {
   type DriverTargetOption,
   type WorkerTargetPermissions,
 } from "./driver.js";
+export {
+  buildObserverPacket,
+  OBSERVER_OUTPUT_SCHEMA,
+  parseObserverReport,
+  type ObserverFinding,
+  type ObserverReport,
+  type ObserverSeverity,
+} from "./observer.js";
+export {
+  buildRunReport,
+  formatRunReport,
+  type InvocationReport,
+  type RunMetrics,
+  type RunReport,
+  type VerificationReport,
+} from "./report.js";
 export {
   buildCorrectionPacket,
   PACKET_TAIL_LINES,
@@ -99,6 +118,11 @@ export {
   type CorrectionCompletedEvent,
   type CorrectionStartedEvent,
   type DriverDecisionEvent,
+  type InvocationCompletedEvent,
+  type InvocationCreatedEvent,
+  type InvocationEventPayload,
+  type InvocationFailedEvent,
+  type InvocationStartedEvent,
   type RunCancelledEvent,
   type RunCompletedEvent,
   type RunFailedEvent,
@@ -127,6 +151,7 @@ export {
   type InvokeAgentOptions,
   type OrchestratorDeps,
   type ReviewRunOptions,
+  type ObserveRunOptions,
   type VerificationRunner,
   type WorkspaceHandle,
   type WorkspaceProvider,

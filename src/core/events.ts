@@ -28,6 +28,30 @@ export interface WorkspaceCreatedEvent
 export interface AgentStartedEvent
   extends EventBase<"agent.started", { runtime: string; invocationId: string }>, RunScoped {}
 
+export interface InvocationEventPayload {
+  invocationId: string;
+  role: string;
+  runtime: string;
+  model?: string;
+  reasoningEffort: string;
+  parentInvocationId?: string;
+  readOnly: boolean;
+  workspaceWrite: boolean;
+  terminationReason?: string;
+}
+
+export interface InvocationCreatedEvent
+  extends EventBase<"invocation.created", InvocationEventPayload>, RunScoped {}
+
+export interface InvocationStartedEvent
+  extends EventBase<"invocation.started", InvocationEventPayload>, RunScoped {}
+
+export interface InvocationCompletedEvent
+  extends EventBase<"invocation.completed", InvocationEventPayload>, RunScoped {}
+
+export interface InvocationFailedEvent
+  extends EventBase<"invocation.failed", InvocationEventPayload>, RunScoped {}
+
 export interface AgentOutputEvent
   extends
     EventBase<"agent.output", { invocationId: string; stream: "stdout" | "stderr"; chunk: string }>,
@@ -99,6 +123,10 @@ export type ConjunctionEvent =
   | TaskCreatedEvent
   | RunStartedEvent
   | WorkspaceCreatedEvent
+  | InvocationCreatedEvent
+  | InvocationStartedEvent
+  | InvocationCompletedEvent
+  | InvocationFailedEvent
   | AgentStartedEvent
   | AgentOutputEvent
   | AgentCompletedEvent

@@ -7,6 +7,7 @@ import type {
   AgentCapabilities,
   AgentRunInput,
   AgentRunResult,
+  AgentRuntimeUsage,
   ReasoningEffort,
 } from "../../core/index.js";
 import { defaultSpawner, type ProcessSpawner } from "../process.js";
@@ -136,10 +137,16 @@ export class ClaudeAdapter implements AgentAdapter {
           clearTimeout(killEscalation);
         }
         input.signal?.removeEventListener("abort", onAbort);
+        const envelope = structuredOutput ? parseClaudeEnvelope(stdout) : undefined;
         const result: AgentRunResult = { exitCode, timedOut, aborted };
-        const lastMessage = structuredOutput ? structuredOutputLastMessage(stdout) : stdout.trim();
+        const lastMessage = structuredOutput
+          ? structuredOutputLastMessage(stdout, envelope?.raw)
+          : stdout.trim();
         if (lastMessage.length > 0) {
           result.lastMessage = lastMessage;
+        }
+        if (envelope?.usage !== undefined) {
+          result.usage = envelope.usage;
         }
         resolve(result);
       };
@@ -201,28 +208,111 @@ function effortArgs(effort: ReasoningEffort): string[] {
   return mapped === undefined ? [] : ["--effort", mapped];
 }
 
-function structuredOutputLastMessage(stdout: string): string {
+function structuredOutputLastMessage(
+  stdout: string,
+  parsedEnvelope?: Record<string, unknown>,
+): string {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) {
     return "";
   }
-  try {
-    const envelope: unknown = JSON.parse(trimmed);
-    if (
-      typeof envelope === "object" &&
-      envelope !== null &&
-      Object.prototype.hasOwnProperty.call(envelope, "structured_output")
-    ) {
-      const structured = JSON.stringify(
-        (envelope as { structured_output: unknown }).structured_output,
-      );
-      if (structured !== undefined) {
-        return structured;
-      }
+  const envelope = parsedEnvelope ?? parseJsonObject(trimmed);
+  if (
+    envelope !== undefined &&
+    Object.prototype.hasOwnProperty.call(envelope, "structured_output")
+  ) {
+    const structured = JSON.stringify(
+      (envelope as { structured_output: unknown }).structured_output,
+    );
+    if (structured !== undefined) {
+      return structured;
     }
-  } catch {
-    // Preserve the raw runtime output so the generic caller can fail/fallback
-    // without learning Claude's transport envelope.
   }
   return trimmed;
+}
+
+function parseClaudeEnvelope(
+  stdout: string,
+): { raw: Record<string, unknown>; usage?: AgentRuntimeUsage } | undefined {
+  const raw = parseJsonObject(stdout.trim());
+  if (raw === undefined) {
+    return undefined;
+  }
+  const usage: AgentRuntimeUsage = {};
+  const duration = numberField(raw.duration_ms) ?? numberField(raw.duration_api_ms);
+  if (duration !== undefined) {
+    usage.durationMs = duration;
+  }
+  const cost = numberField(raw.total_cost_usd);
+  if (cost !== undefined) {
+    usage.costUsd = cost;
+  }
+  const aggregate = parseTokenUsage(raw.usage);
+  if (aggregate !== undefined) {
+    usage.tokens = aggregate;
+  }
+  const modelUsage = parseModelUsage(raw.modelUsage);
+  if (modelUsage !== undefined) {
+    usage.models = modelUsage;
+  }
+  return { raw, ...(Object.keys(usage).length > 0 ? { usage } : {}) };
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseTokenUsage(value: unknown): NonNullable<AgentRuntimeUsage["tokens"]> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const tokens: NonNullable<AgentRuntimeUsage["tokens"]> = {};
+  assignNumber(tokens, "inputTokens", numberField(record.input_tokens));
+  assignNumber(tokens, "outputTokens", numberField(record.output_tokens));
+  assignNumber(tokens, "cacheReadInputTokens", numberField(record.cache_read_input_tokens));
+  assignNumber(tokens, "cacheCreationInputTokens", numberField(record.cache_creation_input_tokens));
+  return Object.keys(tokens).length > 0 ? tokens : undefined;
+}
+
+function parseModelUsage(value: unknown): NonNullable<AgentRuntimeUsage["models"]> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const models: NonNullable<AgentRuntimeUsage["models"]> = [];
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      continue;
+    }
+    const record = raw as Record<string, unknown>;
+    const model: NonNullable<AgentRuntimeUsage["models"]>[number] = { name };
+    assignNumber(model, "inputTokens", numberField(record.inputTokens));
+    assignNumber(model, "outputTokens", numberField(record.outputTokens));
+    assignNumber(model, "cacheReadInputTokens", numberField(record.cacheReadInputTokens));
+    assignNumber(model, "cacheCreationInputTokens", numberField(record.cacheCreationInputTokens));
+    assignNumber(model, "costUsd", numberField(record.costUSD));
+    models.push(model);
+  }
+  return models.length > 0 ? models : undefined;
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function assignNumber<T extends object, K extends keyof T>(
+  target: T,
+  key: K,
+  value: number | undefined,
+): void {
+  if (value !== undefined) {
+    target[key] = value as Exclude<T[K], undefined>;
+  }
 }

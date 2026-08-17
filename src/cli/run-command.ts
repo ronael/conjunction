@@ -56,7 +56,7 @@ function agentStepLine(run: Run, label: string): string {
 }
 
 export interface SelectedRuntimeTarget {
-  role: "driver" | "worker" | "critic";
+  role: "driver" | "worker" | "critic" | "observer";
   target: ExecutionTarget;
   explicitEffort?: ReasoningEffort;
   requiresReadOnly?: boolean;
@@ -80,8 +80,21 @@ export function selectedRuntimeTargets(
     selected.push({
       role: "critic",
       target: options.criticTarget ?? options.workerTarget,
+      requiresReadOnly: true,
+      requiresStructuredOutput: true,
       ...(options.criticReasoningEffort !== undefined
         ? { explicitEffort: options.criticReasoningEffort }
+        : {}),
+    });
+  }
+  if (options.observerTarget !== undefined) {
+    selected.push({
+      role: "observer",
+      target: options.observerTarget,
+      requiresReadOnly: true,
+      requiresStructuredOutput: true,
+      ...(options.observerReasoningEffort !== undefined
+        ? { explicitEffort: options.observerReasoningEffort }
         : {}),
     });
   }
@@ -112,6 +125,10 @@ export interface RunTaskOptions {
   criticTarget?: ExecutionTarget;
   /** Explicit critic effort intent; default is recorded as medium by core. */
   criticReasoningEffort?: ReasoningEffort;
+  /** Optional read-only Observer invocation target, run after the workflow outcome is fixed. */
+  observerTarget?: ExecutionTarget;
+  /** Explicit observer effort intent; default is recorded as medium by core. */
+  observerReasoningEffort?: ReasoningEffort;
   repoPath: string;
   /** Empty list = no verification; the run still completes (vacuous pass). */
   verifyCommands: VerificationCommand[];
@@ -196,11 +213,20 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       const supported = adapter.capabilities().reasoningEffort;
       if (!supported.includes(selected.explicitEffort)) {
         out(
-          `error: runtime "${adapter.id}" does not support reasoning effort ` +
+          `error: ${selected.role} runtime "${adapter.id}" does not support reasoning effort ` +
             `"${selected.explicitEffort}" (supported: ${supported.join(", ") || "none"})\n`,
         );
         return { exitCode: 2, repoRoot: "", storeDir: "" };
       }
+    }
+    const capabilities = adapter.capabilities();
+    if (selected.requiresReadOnly === true && !capabilities.supportsReadOnly) {
+      out(`error: ${selected.role} runtime "${adapter.id}" does not support read-only execution\n`);
+      return { exitCode: 2, repoRoot: "", storeDir: "" };
+    }
+    if (selected.requiresStructuredOutput === true && !capabilities.supportsStructuredOutput) {
+      out(`error: ${selected.role} runtime "${adapter.id}" does not support structured output\n`);
+      return { exitCode: 2, repoRoot: "", storeDir: "" };
     }
     const availability = await adapter.detect();
     if (!availability.available) {
@@ -384,6 +410,45 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
         }
       }
     }
+
+    if (options.observerTarget !== undefined && deps.signal?.aborted !== true && isTerminal(run)) {
+      out("\n── observer ──\n");
+      try {
+        await orchestrator.observeRun(run.id, {
+          timeoutMs: options.timeoutMinutes * 60_000,
+          target: options.observerTarget,
+          ...(options.observerReasoningEffort !== undefined
+            ? { explicitReasoningEffort: options.observerReasoningEffort }
+            : {}),
+          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+          onOutput: (chunk, stream) => {
+            observer?.agentOutput?.(chunk, stream);
+            out(chunk);
+          },
+        });
+      } catch (error) {
+        run.observer = {
+          summary: "",
+          findings: [],
+          structured: false,
+          completedAt: new Date().toISOString(),
+          agentResult: {
+            exitCode: 1,
+            timedOut: false,
+            aborted: false,
+          },
+          error: (error as Error).message,
+        };
+      }
+      await flush(task, run);
+      if (run.observer !== undefined) {
+        out(
+          run.observer.error !== undefined
+            ? stepLine("•", "Observer", `unavailable (advisory): ${run.observer.error}`)
+            : stepLine("✓", "Observer", `${run.observer.findings.length} finding(s)`),
+        );
+      }
+    }
   } catch (error) {
     const message = (error as Error).message;
     const aborted = deps.signal?.aborted === true;
@@ -450,6 +515,15 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       }\n`,
     );
   }
+  if (run.observer !== undefined) {
+    out(
+      `Observer:  ${
+        run.observer.error !== undefined
+          ? `unavailable (advisory): ${run.observer.error}`
+          : `${run.observer.findings.length} finding(s)`
+      }\n`,
+    );
+  }
   const metadataPath = path.join(store.dir, `${run.id}.json`);
   out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);
 
@@ -468,4 +542,8 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
     result.verification = latestVerification;
   }
   return result;
+}
+
+function isTerminal(run: Run): boolean {
+  return run.state === "completed" || run.state === "failed" || run.state === "cancelled";
 }

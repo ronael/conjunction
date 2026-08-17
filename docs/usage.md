@@ -145,6 +145,11 @@ Options:
 - `--critic-runtime <id>` / `--critic-model <model>` /
   `--critic-effort <level>` — independent critic target; defaults to the worker
   target unless set.
+- `--observer-runtime <id>` / `--observer-model <model>` /
+  `--observer-effort <level>` — optional read-only Observer target. The
+  Observer runs after the workflow outcome is fixed, receives bounded
+  structured run facts, and is advisory only. It requires runtime support for
+  read-only execution and structured output.
 - `--cleanup` — attempt to remove the worktree+branch after the run. Removal
   is refused (and the worktree preserved) when it has uncommitted changes.
 - `--plain` — force plain text output (no TUI), same as piping/CI behavior.
@@ -293,9 +298,72 @@ continues with a warning and no metadata):
 - `.conjunction/runs/<runId>.json` — task + run metadata, including explicit
   agent `invocations`, rewritten at each state change;
 - `.conjunction/runs/<runId>.events.jsonl` — the full event stream
-  (`task.created`, `run.started`, `workspace.created`, `agent.started`,
-  `agent.output`, `agent.completed`, `verification.*`, `correction.*`,
+  (`task.created`, `run.started`, `workspace.created`, `invocation.created`,
+  `invocation.started`, `agent.started`, `agent.output`, `agent.completed`,
+  `invocation.completed/failed`, `verification.*`, `correction.*`,
   `review.*`, `run.landed`, `run.completed/failed/cancelled`).
+
+### `conjunction report <runId>`
+
+Builds a run intelligence report from stored Conjunction facts. The report does
+not parse raw runtime stdout to invent metrics; unavailable usage remains
+`unknown` in human output and `null` in JSON.
+
+```bash
+conjunction report <runId> --repo /path/to/repo
+conjunction report <runId> --repo /path/to/repo --json
+```
+
+The JSON report includes:
+
+- outcome state and deterministic verification evidence;
+- invocation summaries with role, runtime, model, reasoning effort, parent,
+  termination reason and duration;
+- actual invocation permissions (`readOnly`, `workspaceWrite`) derived from the
+  invocation, not from runtime capabilities;
+- aggregate usage only when adapters expose reliable structured usage
+  telemetry;
+- target switches, effort escalations, correction count and verification
+  timings;
+- review and Observer summaries when present;
+- acceptance coverage as `demonstrated`, `failed`, or `not_demonstrated`.
+
+## Live Eval
+
+`pnpm eval:live` is an explicit, opt-in real-runtime smoke scenario. It is not
+part of `pnpm test`.
+
+Run `pnpm build` first, then:
+
+```bash
+pnpm eval:live
+```
+
+The script creates a disposable Git repository, runs the `quality` workflow
+through `dist/cli/main.js`, verifies the main branch remains untouched before
+landing, checks the generated worktree, runs deterministic verification, and
+generates the same JSON report as `conjunction report`.
+
+Defaults:
+
+- worker: `codex-cli`;
+- driver: `claude-code`;
+- critic: `claude-code`;
+- observer: `claude-code`;
+- timeout: `5` minutes;
+- max invocations: `8`.
+
+Useful environment overrides:
+
+- `CONJUNCTION_LIVE_WORKER_RUNTIME`, `CONJUNCTION_LIVE_WORKER_MODEL`;
+- `CONJUNCTION_LIVE_DRIVER_RUNTIME`, `CONJUNCTION_LIVE_DRIVER_MODEL`;
+- `CONJUNCTION_LIVE_CRITIC_RUNTIME`, `CONJUNCTION_LIVE_CRITIC_MODEL`;
+- `CONJUNCTION_LIVE_OBSERVER_RUNTIME`, `CONJUNCTION_LIVE_OBSERVER_MODEL`;
+- `CONJUNCTION_LIVE_TIMEOUT_MINUTES`;
+- `CONJUNCTION_LIVE_MAX_INVOCATIONS`;
+- `CONJUNCTION_LIVE_MAX_COST_USD` and `CONJUNCTION_LIVE_MAX_TOKENS`, enforced
+  only when the report has reliable usage telemetry;
+- `CONJUNCTION_LIVE_KEEP_REPO=1`, to preserve the fixture for inspection.
 
 ### `conjunction land <runId>`
 

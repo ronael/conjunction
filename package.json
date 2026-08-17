@@ -18,7 +18,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write . && eslint . --fix",
     "test": "vitest run --passWithNoTests",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "eval:live": "node scripts/live-eval.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

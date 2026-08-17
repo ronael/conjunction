@@ -63,6 +63,12 @@ export async function runQualityTask(
   if (options.criticReasoningEffort !== undefined) {
     preflightInput.criticReasoningEffort = options.criticReasoningEffort;
   }
+  if (options.observerTarget !== undefined) {
+    preflightInput.observerTarget = options.observerTarget;
+  }
+  if (options.observerReasoningEffort !== undefined) {
+    preflightInput.observerReasoningEffort = options.observerReasoningEffort;
+  }
   const preflight = await preflightQualityTargets(preflightInput);
   if (preflight.ok === false) {
     out(`${preflight.message}\n`);
@@ -324,6 +330,45 @@ export async function runQualityTask(
     }
   }
 
+  if (options.observerTarget !== undefined && deps.signal?.aborted !== true && isTerminal(run)) {
+    out("\n-- observer --\n");
+    try {
+      await orchestrator.observeRun(run.id, {
+        timeoutMs: options.timeoutMinutes * 60_000,
+        target: options.observerTarget,
+        ...(options.observerReasoningEffort !== undefined
+          ? { explicitReasoningEffort: options.observerReasoningEffort }
+          : {}),
+        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+        onOutput: (chunk, stream) => {
+          observer?.agentOutput?.(chunk, stream);
+          out(chunk);
+        },
+      });
+    } catch (error) {
+      run.observer = {
+        summary: "",
+        findings: [],
+        structured: false,
+        completedAt: new Date().toISOString(),
+        agentResult: {
+          exitCode: 1,
+          timedOut: false,
+          aborted: false,
+        },
+        error: (error as Error).message,
+      };
+    }
+    await flush(task, run);
+    if (run.observer !== undefined) {
+      out(
+        run.observer.error !== undefined
+          ? stepLine("•", "Observer", `unavailable (advisory): ${run.observer.error}`)
+          : stepLine("✓", "Observer", `${run.observer.findings.length} finding(s)`),
+      );
+    }
+  }
+
   await flush(task, run);
   out("\n-- summary --\n");
   out(`State:     ${run.state.toUpperCase()}\n`);
@@ -355,6 +400,15 @@ export async function runQualityTask(
       }\n`,
     );
   }
+  if (run.observer !== undefined) {
+    out(
+      `Observer:  ${
+        run.observer.error !== undefined
+          ? `unavailable (advisory): ${run.observer.error}`
+          : `${run.observer.findings.length} finding(s)`
+      }\n`,
+    );
+  }
   const metadataPath = path.join(store.dir, `${run.id}.json`);
   out(`Metadata:  ${metadataPath} (+ .events.jsonl)\n`);
 
@@ -382,6 +436,8 @@ interface PreflightInput {
   workerTargets: readonly WorkerTargetInput[];
   criticTarget: ExecutionTarget;
   criticReasoningEffort?: ReasoningEffort;
+  observerTarget?: ExecutionTarget;
+  observerReasoningEffort?: ReasoningEffort;
 }
 
 type PreflightResult =
@@ -437,10 +493,30 @@ async function preflightQualityTargets(input: PreflightInput): Promise<Preflight
   if (critic !== undefined) {
     return { ok: false, message: critic };
   }
+  if (input.observerTarget !== undefined) {
+    const observerRequirements = {
+      label: "observer",
+      readOnly: true,
+      structuredOutput: true,
+    };
+    const observer = validateTarget(
+      input.runtimeRegistry,
+      input.observerTarget,
+      input.observerReasoningEffort !== undefined
+        ? { ...observerRequirements, explicitEffort: input.observerReasoningEffort }
+        : observerRequirements,
+    );
+    if (observer !== undefined) {
+      return { ok: false, message: observer };
+    }
+  }
 
   const targetsToDetect = new Map<string, ExecutionTarget>();
   targetsToDetect.set(input.driverTarget.runtime, input.driverTarget);
   targetsToDetect.set(input.criticTarget.runtime, input.criticTarget);
+  if (input.observerTarget !== undefined) {
+    targetsToDetect.set(input.observerTarget.runtime, input.observerTarget);
+  }
   for (const entry of input.workerTargets) {
     targetsToDetect.set(entry.target.runtime, entry.target);
   }
@@ -600,4 +676,8 @@ function lastWritableInvocation(run: Run): NonNullable<Run["invocations"]>[numbe
   return [...(run.invocations ?? [])]
     .reverse()
     .find((invocation) => invocation.role === "worker" && invocation.readOnly !== true);
+}
+
+function isTerminal(run: Run): boolean {
+  return run.state === "completed" || run.state === "failed" || run.state === "cancelled";
 }

@@ -161,6 +161,58 @@ describe("ClaudeAdapter.run invocation", () => {
     expect(result.lastMessage).toBe(JSON.stringify(structured));
   });
 
+  it("extracts reliable usage from Claude's structured transport envelope", async () => {
+    const schema = { type: "object", properties: { summary: { type: "string" } } };
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(
+        JSON.stringify({
+          type: "result",
+          structured_output: { summary: "review ok", findings: [] },
+          duration_ms: 2500,
+          total_cost_usd: 0.0123,
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_input_tokens: 50,
+            cache_creation_input_tokens: 10,
+          },
+          modelUsage: {
+            "claude-sonnet-4-5": {
+              inputTokens: 100,
+              outputTokens: 20,
+              cacheReadInputTokens: 50,
+              cacheCreationInputTokens: 10,
+              costUSD: 0.0123,
+            },
+          },
+        }),
+      );
+      child.exit(0);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.usage).toEqual({
+      durationMs: 2500,
+      costUsd: 0.0123,
+      tokens: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadInputTokens: 50,
+        cacheCreationInputTokens: 10,
+      },
+      models: [
+        {
+          name: "claude-sonnet-4-5",
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheReadInputTokens: 50,
+          cacheCreationInputTokens: 10,
+          costUsd: 0.0123,
+        },
+      ],
+    });
+  });
+
   it("preserves malformed JSON output for generic parsing fallback", async () => {
     const schema = { type: "object" };
     const fake = fakeSpawn((child) => {

@@ -385,6 +385,49 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
 `examples/chessquest/brief.md` is a benchmark brief used to compare workflows on
 identical input. Conjunction does not build that application.
 
+## V1 Lot 4 — run intelligence, Observer, live eval
+
+This pass adds the facts/reporting layer needed to understand how a run
+executed without turning the CLI into the final product UX:
+
+- **Invocation event model:** every adapter-backed invocation now emits
+  `invocation.created`, `invocation.started`, and a terminal
+  `invocation.completed` or `invocation.failed` event. These events carry the
+  run id, invocation id, role, runtime, model when known, reasoning effort,
+  parent invocation, effective `readOnly`, effective `workspaceWrite`, and
+  termination reason. The older `agent.*` events remain for process output and
+  compatibility; `agent.output` remains attributed by `invocationId`.
+- **Run reports are pure facts:** `buildRunReport()` derives metrics from the
+  persisted `Run`, `Task`, and event stream. It reports duration, invocation
+  counts, attempts, corrections, target switches, effort escalations,
+  verification timings, review counts, acceptance coverage, warnings, and
+  optional usage. `conjunction report <runId>` renders the same report as human
+  text or JSON.
+- **Capability is not permission:** reports and Observer packets expose
+  invocation permissions (`readOnly`, `workspaceWrite`) from the actual
+  invocation state. Runtime capability facts such as `supportsReadOnly` are not
+  reported as "the worker was read-only" or "the worker could not write".
+- **Usage telemetry:** `AgentRunResult.usage` is optional and runtime-agnostic.
+  Claude Code structured-output envelopes currently provide reliable duration,
+  model usage, token usage, and cost fields, so the Claude adapter extracts
+  those fields from the JSON transport envelope. Codex usage remains unknown
+  unless a reliable structured protocol is added later; Conjunction does not
+  parse human stdout such as token summaries.
+- **Observer:** `role: "observer"` is an optional read-only, structured-output
+  invocation after the main workflow has already reached a terminal result. It
+  receives a bounded packet of structured facts and records advisory findings on
+  `run.observer`; it never changes run state or exit code.
+- **Live eval:** `pnpm eval:live` is an explicit opt-in real-runtime scenario
+  outside Vitest. It creates a disposable Git repo, runs the quality workflow,
+  verifies main is untouched before landing, checks the worktree and
+  deterministic verification, enforces invocation/cost/token guards when data
+  exists, and generates the same JSON report pipeline.
+
+Still deliberately absent: no Observer framework, no routing engine, no
+database, no server mode, no terminal permission policy beyond the runtime
+capabilities already enforced at invocation boundaries, and no CLI
+productization pass.
+
 ## TUI (Ink) — dependency decision
 
 `conjunction run` renders an interactive TUI when stdout is a TTY (plain text

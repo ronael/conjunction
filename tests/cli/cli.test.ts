@@ -132,9 +132,12 @@ describe("cli run (stub adapter, real git repo)", () => {
       "task.created",
       "run.started",
       "workspace.created",
+      "invocation.created",
+      "invocation.started",
       "agent.started",
       "agent.output",
       "agent.completed",
+      "invocation.completed",
       "verification.started",
       "verification.passed",
       "run.completed",
@@ -150,6 +153,55 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(text).toContain("✓ Workspace ready");
     expect(text).toContain("✓ Agent (attempt 1)");
     expect(text).toContain("✓ Verification");
+  });
+
+  it("generates structured and human run reports from stored facts", async () => {
+    const repo = await makeTempRepo();
+    const runIo = capture();
+
+    const code = await cli(
+      ["run", "create hello.txt", "--repo", repo, "--verify", "test -f hello.txt"],
+      { adapter: fileCreatingStub, out: runIo.out },
+    );
+    expect(code).toBe(0);
+    const [runId] = await storedRunIds(repo);
+    expect(runId).toBeDefined();
+
+    const jsonIo = capture();
+    const jsonCode = await cli(["report", runId ?? "", "--repo", repo, "--json"], {
+      adapter: fileCreatingStub,
+      out: jsonIo.out,
+    });
+    expect(jsonCode).toBe(0);
+    const report = JSON.parse(jsonIo.text()) as {
+      metrics: { invocationCount: number; usage: { inputTokens: number | null } };
+      invocations: {
+        role: string;
+        permissions: { readOnly: boolean; workspaceWrite: boolean };
+        usageKnown: boolean;
+      }[];
+      acceptanceCoverage: { status: string };
+    };
+    expect(report.metrics.invocationCount).toBe(1);
+    expect(report.metrics.usage.inputTokens).toBeNull();
+    expect(report.invocations).toMatchObject([
+      {
+        role: "worker",
+        permissions: { readOnly: false, workspaceWrite: true },
+        usageKnown: false,
+      },
+    ]);
+    expect(report.acceptanceCoverage.status).toBe("demonstrated");
+
+    const humanIo = capture();
+    const humanCode = await cli(["report", runId ?? "", "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: humanIo.out,
+    });
+    expect(humanCode).toBe(0);
+    expect(humanIo.text()).toContain(`Run #${runId}`);
+    expect(humanIo.text()).toContain("readOnly=false workspaceWrite=true");
+    expect(humanIo.text()).toContain("tokens in          unknown");
   });
 
   it("fails (exit 1) when verification fails, run state recorded as failed", async () => {

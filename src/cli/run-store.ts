@@ -37,6 +37,20 @@ export class RunStore {
     );
   }
 
+  async events(runId: string): Promise<ConjunctionEvent[]> {
+    let raw: string;
+    try {
+      raw = await readFile(path.join(this.dir, `${runId}.events.jsonl`), "utf8");
+    } catch {
+      return [];
+    }
+    return raw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ConjunctionEvent);
+  }
+
   /** Load one stored run by full id or unique id prefix; undefined if not found/ambiguous. */
   async get(runIdOrPrefix: string): Promise<StoredRun | undefined> {
     try {

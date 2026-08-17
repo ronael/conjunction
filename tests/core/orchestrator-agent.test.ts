@@ -101,10 +101,13 @@ describe("Orchestrator.executeRun", () => {
       "task.created",
       "run.started",
       "workspace.created",
+      "invocation.created",
+      "invocation.started",
       "agent.started",
       "agent.output",
       "agent.output",
       "agent.completed",
+      "invocation.completed",
     ]);
     const outputs = orchestrator.events.ofType("agent.output");
     const invocationId = run.invocations?.[0]?.id;
@@ -115,6 +118,76 @@ describe("Orchestrator.executeRun", () => {
       ],
     );
     expect(forwarded).toEqual(["working…\n", "warning\n"]);
+  });
+
+  it("runs an advisory read-only observer after a terminal run", async () => {
+    const { adapter, inputs } = stubAgent(
+      (input) => {
+        input.onOutput?.("observer packet received\n", "stdout");
+      },
+      {
+        exitCode: 0,
+        lastMessage: JSON.stringify({
+          summary: "facts look coherent",
+          findings: [{ severity: "info", message: "verification evidence exists" }],
+        }),
+      },
+    );
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    run.verificationResult = { passed: true, results: [] };
+    const verificationRecord = {
+      id: "verify-1",
+      startedAt: "2026-01-01T00:00:03.000Z",
+      completedAt: "2026-01-01T00:00:04.000Z",
+      outcome: { passed: true, results: [] },
+      failureSignature: "passed",
+    };
+    run.verificationHistory = [
+      run.invocations?.[0]?.id !== undefined
+        ? { ...verificationRecord, afterInvocationId: run.invocations[0].id }
+        : verificationRecord,
+    ];
+    run.state = "completed";
+    run.completedAt = "2026-01-01T00:00:05.000Z";
+
+    await orchestrator.observeRun(run.id, { timeoutMs: 1_000, target: { runtime: "stub-agent" } });
+
+    expect(inputs.at(-1)).toMatchObject({
+      readOnly: true,
+      outputSchema: expect.objectContaining({ type: "object" }),
+    });
+    expect(inputs.at(-1)?.instructions).toContain("Structured facts");
+    expect(run.state).toBe("completed");
+    expect(run.observer).toMatchObject({
+      structured: true,
+      summary: "facts look coherent",
+      findings: [{ severity: "info", message: "verification evidence exists" }],
+    });
+    expect(run.invocations?.at(-1)).toMatchObject({
+      role: "observer",
+      readOnly: true,
+      state: "completed",
+      terminationReason: "completed",
+    });
+    const lifecycle = orchestrator.events
+      .all()
+      .filter((event) => event.type.startsWith("invocation."))
+      .map((event) => event.type);
+    expect(lifecycle).toEqual([
+      "invocation.created",
+      "invocation.started",
+      "invocation.completed",
+      "invocation.created",
+      "invocation.started",
+      "invocation.completed",
+    ]);
   });
 
   it("refuses explicit unsupported reasoning effort before adapter.run", async () => {

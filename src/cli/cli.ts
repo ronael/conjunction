@@ -46,8 +46,11 @@ usage:
                            [--critic-runtime <id>] [--critic-model <model>]
                            [--critic-effort <level>]
                            [--timeout <minutes>] [--cleanup]
+                           [--observer-runtime <id>] [--observer-model <model>]
+                           [--observer-effort <level>]
                            [--plain] [--no-correct] [--review]
   conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
+  conjunction report <runId> [--repo <path>] [--json]
   conjunction status [--repo <path>]
   conjunction doctor
 
@@ -114,8 +117,11 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
             "worker-target",
             "critic-runtime",
             "critic-model",
+            "observer-runtime",
+            "observer-model",
             "effort",
             "critic-effort",
+            "observer-effort",
           ],
           flags: ["cleanup", "help", "plain", "no-correct", "review"],
         });
@@ -162,6 +168,15 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         const workerReasoningEffort = parseReasoningEffort(parsed.options.effort?.at(-1));
         const driverReasoningEffort = parseReasoningEffort(parsed.options["driver-effort"]?.at(-1));
         const criticReasoningEffort = parseReasoningEffort(parsed.options["critic-effort"]?.at(-1));
+        const observerRuntime = parsed.options["observer-runtime"]?.at(-1);
+        const observerModel = parsed.options["observer-model"]?.at(-1);
+        const observerTarget =
+          observerRuntime !== undefined || observerModel !== undefined
+            ? buildTarget(observerRuntime ?? workerTarget.runtime, observerModel)
+            : undefined;
+        const observerReasoningEffort = parseReasoningEffort(
+          parsed.options["observer-effort"]?.at(-1),
+        );
         const runOptions = {
           brief,
           workflow,
@@ -172,6 +187,8 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           ...(driverReasoningEffort !== undefined ? { driverReasoningEffort } : {}),
           ...(criticTarget !== undefined ? { criticTarget } : {}),
           ...(criticReasoningEffort !== undefined ? { criticReasoningEffort } : {}),
+          ...(observerTarget !== undefined ? { observerTarget } : {}),
+          ...(observerReasoningEffort !== undefined ? { observerReasoningEffort } : {}),
           repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
           verifyCommands,
           timeoutMinutes,
@@ -234,6 +251,26 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
             repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
             cleanup: parsed.flags.has("cleanup"),
             ...(branch !== undefined ? { branch } : {}),
+          },
+          { out },
+        );
+      }
+      case "report": {
+        const parsed = parseArgs(rest, { valueOptions: ["repo"], flags: ["help", "json"] });
+        if (parsed.flags.has("help")) {
+          out(USAGE);
+          return 0;
+        }
+        const runId = parsed.positionals[0];
+        if (runId === undefined) {
+          throw new UsageError("report requires a run id (see: conjunction status)");
+        }
+        const { reportCommand } = await import("./report-command.js");
+        return await reportCommand(
+          {
+            runId,
+            repoPath: parsed.options.repo?.at(-1) ?? process.cwd(),
+            json: parsed.flags.has("json"),
           },
           { out },
         );

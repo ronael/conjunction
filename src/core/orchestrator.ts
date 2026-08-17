@@ -6,6 +6,8 @@ import { verificationFailureSignature } from "./driver.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
 import { buildWorkerInstructions } from "./instructions.js";
 import type { ExecutionTarget, Invocation, ReasoningEffort } from "./invocation.js";
+import { buildObserverPacket, OBSERVER_OUTPUT_SCHEMA, parseObserverReport } from "./observer.js";
+import { buildRunReport } from "./report.js";
 import { parseReviewReport, countFindingsBySeverity, REVIEW_OUTPUT_SCHEMA } from "./review.js";
 import {
   isFailedVerificationResult,
@@ -120,7 +122,7 @@ export type InvokeAgentOptions =
       readOnly?: boolean;
     })
   | (InvokeAgentBaseOptions & {
-      role: "driver" | "critic";
+      role: "driver" | "critic" | "observer";
       readOnly?: true;
     });
 
@@ -133,6 +135,8 @@ export interface AgentInvocationResult {
 export type ReviewRunOptions = ExecuteRunOptions & {
   parentInvocationId?: string;
 };
+
+export type ObserveRunOptions = ExecuteRunOptions;
 
 type EventInput<E = ConjunctionEvent> = E extends ConjunctionEvent
   ? Omit<E, "id" | "timestamp">
@@ -362,6 +366,7 @@ export class Orchestrator {
       recordAttempt: boolean;
       updateRunResult: boolean;
       correctionPacket?: string;
+      mutateRunStateOnAgentFailure?: boolean;
     } = {
       recordAttempt: true,
       updateRunResult: true,
@@ -380,6 +385,7 @@ export class Orchestrator {
       recordAttempt: boolean;
       updateRunResult: boolean;
       correctionPacket?: string;
+      mutateRunStateOnAgentFailure?: boolean;
     },
   ): Promise<AgentInvocationResult> {
     if (!this.deps.runtimeRegistry) {
@@ -423,6 +429,12 @@ export class Orchestrator {
       invocationOptions.readOnly = readOnly;
     }
     const invocation = this.#createInvocation(run, options.role, invocationOptions);
+    this.#emit({
+      type: "invocation.created",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
 
@@ -439,6 +451,12 @@ export class Orchestrator {
       run.attempts.push(attempt);
     }
 
+    this.#emit({
+      type: "invocation.started",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
     this.#emit({
       type: "agent.started",
       taskId: run.taskId,
@@ -482,6 +500,9 @@ export class Orchestrator {
     if (result.lastMessage !== undefined) {
       agentResult.summary = result.lastMessage;
     }
+    if (result.usage !== undefined) {
+      agentResult.usage = result.usage;
+    }
     if (attempt !== undefined) {
       attempt.completedAt = completedAt;
       attempt.agentResult = agentResult;
@@ -499,33 +520,74 @@ export class Orchestrator {
       run.result = { summary: result.lastMessage };
     }
 
+    const mutateRunState = bookkeeping.mutateRunStateOnAgentFailure !== false;
     if (result.aborted) {
       invocation.state = "cancelled";
       invocation.terminationReason = "aborted";
-      this.cancelRun(run.id, "agent execution aborted");
+      if (mutateRunState) {
+        this.cancelRun(run.id, "agent execution aborted");
+      }
     } else if (result.timedOut) {
       invocation.state = "failed";
       invocation.terminationReason = "timed_out";
-      this.failRun(run.id, `agent timed out after ${options.timeoutMs}ms`);
+      if (mutateRunState) {
+        this.failRun(run.id, `agent timed out after ${options.timeoutMs}ms`);
+      }
     } else if (result.exitCode !== 0) {
       invocation.state = "failed";
       invocation.terminationReason = "process_failed";
-      this.failRun(run.id, `agent exited with code ${result.exitCode ?? "null (killed)"}`);
+      if (mutateRunState) {
+        this.failRun(run.id, `agent exited with code ${result.exitCode ?? "null (killed)"}`);
+      }
     } else {
       invocation.state = "completed";
       invocation.terminationReason = "completed";
     }
+    this.#emit({
+      type: invocation.state === "completed" ? "invocation.completed" : "invocation.failed",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
     return { run, invocation, result };
   }
 
   #readOnlyForRole(role: Role, requested: boolean | undefined): boolean | undefined {
-    if (role === "driver" || role === "critic") {
+    if (role === "driver" || role === "critic" || role === "observer") {
       if (requested === false) {
         throw new RunNotExecutableError(`${role} invocations are always read-only`);
       }
       return true;
     }
     return requested;
+  }
+
+  #invocationPayload(invocation: Invocation): {
+    invocationId: string;
+    role: string;
+    runtime: string;
+    model?: string;
+    reasoningEffort: string;
+    parentInvocationId?: string;
+    readOnly: boolean;
+    workspaceWrite: boolean;
+    terminationReason?: string;
+  } {
+    return {
+      invocationId: invocation.id,
+      role: invocation.role,
+      runtime: invocation.target.runtime,
+      ...(invocation.target.model !== undefined ? { model: invocation.target.model } : {}),
+      reasoningEffort: invocation.reasoningEffort,
+      ...(invocation.parentInvocationId !== undefined
+        ? { parentInvocationId: invocation.parentInvocationId }
+        : {}),
+      readOnly: invocation.readOnly === true,
+      workspaceWrite: invocation.role === "worker" && invocation.readOnly !== true,
+      ...(invocation.terminationReason !== undefined
+        ? { terminationReason: invocation.terminationReason }
+        : {}),
+    };
   }
 
   /**
@@ -772,8 +834,20 @@ export class Orchestrator {
       reasoningEffort,
       readOnly: true,
     });
+    this.#emit({
+      type: "invocation.created",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
     invocation.state = "running";
     invocation.startedAt = this.#timestamp();
+    this.#emit({
+      type: "invocation.started",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
 
     this.#emit({
       type: "agent.started",
@@ -813,6 +887,9 @@ export class Orchestrator {
     if (result.lastMessage !== undefined) {
       agentResult.summary = result.lastMessage;
     }
+    if (result.usage !== undefined) {
+      agentResult.usage = result.usage;
+    }
     invocation.completedAt = this.#timestamp();
     invocation.outcome = agentResult;
     this.#emit({
@@ -825,6 +902,12 @@ export class Orchestrator {
     if (result.aborted) {
       invocation.state = "cancelled";
       invocation.terminationReason = "aborted";
+      this.#emit({
+        type: "invocation.failed",
+        taskId: run.taskId,
+        runId: run.id,
+        payload: this.#invocationPayload(invocation),
+      });
       this.cancelRun(run.id, "review aborted");
       return run;
     }
@@ -860,6 +943,12 @@ export class Orchestrator {
       invocation.terminationReason = "completed";
     }
     this.#emit({
+      type: invocation.state === "completed" ? "invocation.completed" : "invocation.failed",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: this.#invocationPayload(invocation),
+    });
+    this.#emit({
       type: "review.completed",
       taskId: run.taskId,
       runId: run.id,
@@ -869,6 +958,71 @@ export class Orchestrator {
     transitionRun(run, "completed", this.#timestamp());
     task.status = "completed";
     this.#emit({ type: "run.completed", taskId: run.taskId, runId: run.id, payload: {} });
+    return run;
+  }
+
+  async observeRun(runId: string, options: ObserveRunOptions): Promise<Run> {
+    const run = this.#requireRun(runId);
+    const task = this.#requireTask(run.taskId);
+    if (run.state !== "completed" && run.state !== "failed" && run.state !== "cancelled") {
+      throw new RunNotExecutableError(`state must be terminal, got "${run.state}"`);
+    }
+    const report = buildRunReport({ run, task, events: this.events.forRun(run.id) });
+    const result = await this.#invokeAgent(
+      run,
+      {
+        role: "observer",
+        instructions: buildObserverPacket(report),
+        timeoutMs: options.timeoutMs,
+        ...(options.target !== undefined ? { target: options.target } : {}),
+        ...(options.explicitReasoningEffort !== undefined
+          ? { explicitReasoningEffort: options.explicitReasoningEffort }
+          : {}),
+        readOnly: true,
+        outputSchema: OBSERVER_OUTPUT_SCHEMA,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.onOutput !== undefined ? { onOutput: options.onOutput } : {}),
+      },
+      {
+        recordAttempt: false,
+        updateRunResult: false,
+        mutateRunStateOnAgentFailure: false,
+      },
+    );
+    const agentResult: AgentAttemptOutcome = {
+      exitCode: result.result.exitCode,
+      timedOut: result.result.timedOut,
+      aborted: result.result.aborted,
+    };
+    if (result.result.lastMessage !== undefined) {
+      agentResult.summary = result.result.lastMessage;
+    }
+    if (result.result.usage !== undefined) {
+      agentResult.usage = result.result.usage;
+    }
+    if (result.result.timedOut || result.result.aborted || result.result.exitCode !== 0) {
+      run.observer = {
+        summary: "",
+        findings: [],
+        structured: false,
+        completedAt: this.#timestamp(),
+        agentResult,
+        error: result.result.timedOut
+          ? `observer timed out after ${options.timeoutMs}ms`
+          : result.result.aborted
+            ? "observer aborted"
+            : `observer exited with code ${result.result.exitCode ?? "null (killed)"}`,
+      };
+    } else {
+      const parsed = parseObserverReport(result.result.lastMessage ?? "");
+      run.observer = {
+        summary: parsed.report.summary,
+        findings: parsed.report.findings,
+        structured: parsed.structured,
+        completedAt: this.#timestamp(),
+        agentResult,
+      };
+    }
     return run;
   }
 

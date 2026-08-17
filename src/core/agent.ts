@@ -1,5 +1,30 @@
 import type { ExecutionTarget, ReasoningEffort } from "./invocation.js";
 
+export interface AgentTokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+}
+
+export interface AgentRuntimeUsage {
+  /** Runtime-reported wall/API duration, if exposed as structured data. */
+  durationMs?: number;
+  /** Runtime/provider-reported cost, only when supplied by the runtime. */
+  costUsd?: number;
+  /** Aggregate token usage, only from a structured runtime contract. */
+  tokens?: AgentTokenUsage;
+  /** Runtime/model identity records, when the runtime exposes them. */
+  models?: {
+    name: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    costUsd?: number;
+  }[];
+}
+
 export interface AgentAvailability {
   available: boolean;
   /** Runtime version string when detectable, e.g. "codex-cli 0.144.1". */
@@ -52,6 +77,8 @@ export interface AgentRunResult {
   aborted: boolean;
   /** The agent's final message, when the runtime exposes one. */
   lastMessage?: string;
+  /** Optional structured runtime usage. Unknown means the runtime did not expose it reliably. */
+  usage?: AgentRuntimeUsage;
 }
 
 /**

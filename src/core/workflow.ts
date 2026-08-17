@@ -17,7 +17,7 @@
  * What a participant is FOR — never how it is executed (runtime) or which AI
  * backs it (model). No adapter or provider name may ever appear here.
  */
-export type Role = "driver" | "worker" | "critic";
+export type Role = "driver" | "worker" | "critic" | "observer";
 
 export type WorkflowName = "single" | "review" | "quality";
 
