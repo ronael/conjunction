@@ -173,7 +173,7 @@ export interface RunObserver {
   /** Quality workflow: the Driver produced a parsed decision. */
   driverDecision?(decision: DriverDecisionRecord): void;
   /** Quality workflow: the current Worker invocation finished. */
-  workerFinished?(): void;
+  workerFinished?(outcome: "completed" | "failed" | "cancelled"): void;
   /** Quality workflow: the Driver accepted the implementation. */
   driverAccepted?(): void;
   /** Quality workflow: the final verification before review is starting. */

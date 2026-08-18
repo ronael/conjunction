@@ -374,13 +374,13 @@ describe("RunModel quality workflow steps", () => {
     const model = modelWithContext("quality");
     model.verifyItems = [{ name: "test", status: "pending" }];
 
-    expect(model.steps.map((s) => [s.id, s.status])).toEqual([
-      ["workspace", "done"],
-      ["driver-1", "active"],
-    ]);
+    // setContext only prepares workspace/context; the first Driver step is created
+    // by driverStarted when the real invocation begins.
+    expect(model.steps.map((s) => [s.id, s.status])).toEqual([["workspace", "done"]]);
 
     model.driverStarted();
-    // driverStarted starts a new driver step and completes any active worker step
+    expect(model.steps.filter((s) => s.id.startsWith("driver-")).length).toBe(1);
+    expect(model.steps.filter((s) => s.status === "active").length).toBe(1);
     expect(model.steps.find((s) => s.id === "driver-1")?.status).toBe("active");
 
     model.driverDecision({
@@ -392,10 +392,11 @@ describe("RunModel quality workflow steps", () => {
     expect(model.steps.find((s) => s.id === "driver-1")?.status).toBe("done");
     expect(model.steps.find((s) => s.id === "worker-1")?.status).toBe("active");
 
-    model.workerFinished();
+    model.workerFinished("completed");
     expect(model.steps.find((s) => s.id === "worker-1")?.status).toBe("done");
 
     model.driverStarted();
+    expect(model.steps.filter((s) => s.id.startsWith("driver-")).length).toBe(2);
     expect(model.steps.find((s) => s.id === "driver-2")?.status).toBe("active");
 
     model.driverDecision({ action: "verify", reason: "check" } as never);
@@ -419,15 +420,23 @@ describe("RunModel quality workflow steps", () => {
     expect(model.steps.find((s) => s.id === "verification-1")?.status).toBe("done");
 
     model.driverStarted();
+    expect(model.steps.filter((s) => s.id.startsWith("driver-")).length).toBe(3);
     expect(model.steps.find((s) => s.id === "driver-3")?.status).toBe("active");
 
     model.driverDecision({ action: "accept", reason: "green" } as never);
     expect(model.steps.find((s) => s.id === "driver-3")?.status).toBe("done");
 
+    // finalVerificationStarted only flags the next verification as final;
+    // startVerification creates the single actual step.
     model.finalVerificationStarted();
+    expect(model.steps.filter((s) => s.id.startsWith("verification-")).length).toBe(1);
+    model.startVerification();
+    expect(model.steps.filter((s) => s.id.startsWith("verification-")).length).toBe(2);
+    expect(model.steps.find((s) => s.id === "verification-2")?.label).toBe("Final verification");
     expect(model.steps.find((s) => s.id === "verification-2")?.status).toBe("active");
 
     model.verificationFinished(true);
+    expect(model.steps.find((s) => s.id === "verification-2")?.status).toBe("done");
     model.startReview();
     expect(model.steps.find((s) => s.id === "review")?.status).toBe("active");
 
@@ -440,5 +449,156 @@ describe("RunModel quality workflow steps", () => {
     });
     model.observerStarted();
     expect(model.steps.find((s) => s.id === "observer")?.status).toBe("active");
+  });
+
+  it("projects failed and cancelled worker outcomes", () => {
+    const model = modelWithContext("quality");
+    model.driverStarted();
+    model.driverDecision({
+      action: "delegate",
+      targetId: "worker",
+      objective: "implement",
+      reason: "go",
+    } as never);
+
+    model.workerFinished("failed");
+    expect(model.steps.find((s) => s.id === "worker-1")?.status).toBe("failed");
+    expect(model.steps.find((s) => s.id === "worker-1")?.detail).toBe("failed");
+
+    model.driverStarted();
+    model.driverDecision({
+      action: "delegate",
+      targetId: "worker",
+      objective: "retry",
+      reason: "go",
+    } as never);
+    model.workerFinished("cancelled");
+    expect(model.steps.find((s) => s.id === "worker-2")?.status).toBe("cancelled");
+  });
+
+  it("integration: reproduces the real quality callback sequence without duplicate or ghost steps", () => {
+    const model = modelWithContext("quality");
+    model.verifyItems = [{ name: "test", status: "pending" }];
+
+    function activeCount(): number {
+      return model.steps.filter((s) => s.status === "active").length;
+    }
+
+    model.setContext({
+      run: {
+        id: "run-1",
+        taskId: "task-1",
+        runtime: "stub",
+        workflow: "quality",
+        createdAt: "t0",
+        state: "running",
+        attempts: [],
+        branch: "conjunction/run-1",
+        workspacePath: "/tmp/wt",
+      },
+      task: {
+        id: "task-1",
+        title: "todo api",
+        objective: "build it",
+        constraints: [],
+        acceptanceCriteria: [],
+        status: "in_progress",
+      },
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+    });
+    expect(activeCount()).toBe(0);
+
+    model.driverStarted();
+    expect(activeCount()).toBe(1);
+    model.driverDecision({
+      action: "delegate",
+      targetId: "worker",
+      objective: "implement",
+      reason: "go",
+    } as never);
+    expect(activeCount()).toBe(1);
+
+    model.workerFinished("completed");
+    expect(activeCount()).toBe(0);
+
+    model.driverStarted();
+    expect(activeCount()).toBe(1);
+    model.driverDecision({ action: "verify", reason: "check" } as never);
+    expect(activeCount()).toBe(0);
+
+    model.startVerification();
+    expect(activeCount()).toBe(1);
+    model.verificationFinished(true);
+    expect(activeCount()).toBe(0);
+
+    model.driverStarted();
+    expect(activeCount()).toBe(1);
+    model.driverDecision({ action: "accept", reason: "green" } as never);
+    model.driverAccepted();
+    expect(activeCount()).toBe(0);
+
+    model.finalVerificationStarted();
+    model.startVerification();
+    expect(activeCount()).toBe(1);
+    expect(model.steps.filter((s) => s.id.startsWith("verification-")).length).toBe(2);
+    expect(model.steps.find((s) => s.id === "verification-2")?.label).toBe("Final verification");
+    model.verificationFinished(true);
+    expect(activeCount()).toBe(0);
+
+    model.startReview();
+    expect(activeCount()).toBe(1);
+    model.finishReview({
+      summary: "ok",
+      findings: [],
+      structured: true,
+      completedAt: "t2",
+      agentResult: { exitCode: 0, timedOut: false, aborted: false },
+    });
+    expect(activeCount()).toBe(0);
+
+    model.observerStarted();
+    expect(activeCount()).toBe(1);
+
+    model.finish({
+      exitCode: 0,
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+      run: {
+        id: "run-1",
+        taskId: "task-1",
+        runtime: "stub",
+        workflow: "quality",
+        createdAt: "t0",
+        state: "completed",
+        attempts: [],
+        branch: "conjunction/run-1",
+        workspacePath: "/tmp/wt",
+      },
+      task: {
+        id: "task-1",
+        title: "todo api",
+        objective: "build it",
+        constraints: [],
+        acceptanceCriteria: [],
+        status: "completed",
+      },
+    } as never);
+    expect(activeCount()).toBe(0);
+
+    // No duplicated or unresolved steps.
+    const ids = model.steps.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(model.steps.filter((s) => s.status === "pending").length).toBe(0);
+
+    const driverSteps = model.steps.filter((s) => s.id.startsWith("driver-"));
+    const workerSteps = model.steps.filter((s) => s.id.startsWith("worker-"));
+    const verifySteps = model.steps.filter((s) => s.id.startsWith("verification-"));
+    expect(driverSteps.length).toBe(3);
+    expect(workerSteps.length).toBe(1);
+    expect(verifySteps.length).toBe(2);
+    expect(driverSteps.every((s) => s.status === "done")).toBe(true);
+    expect(workerSteps.every((s) => s.status === "done")).toBe(true);
+    expect(verifySteps.every((s) => s.status === "done")).toBe(true);
   });
 });

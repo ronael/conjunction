@@ -5,6 +5,7 @@ import type {
   DriverProgressFacts,
   DriverTargetOption,
   ExecutionTarget,
+  Orchestrator,
   ReasoningEffort,
   Run,
   RuntimeRegistry,
@@ -288,8 +289,9 @@ export async function runQualityTask(
             : workerPacketInput,
         );
         out("\n-- worker --\n");
+        let workerInvoke: Awaited<ReturnType<Orchestrator["invokeAgent"]>> | undefined;
         try {
-          const workerInvoke = await orchestrator.invokeAgent(run.id, {
+          workerInvoke = await orchestrator.invokeAgent(run.id, {
             role: "worker",
             instructions: workerPacket,
             target: selectedTarget.target,
@@ -313,7 +315,10 @@ export async function runQualityTask(
           }
           throw error;
         } finally {
-          observer?.workerFinished?.();
+          const state = workerInvoke?.invocation.state;
+          observer?.workerFinished?.(
+            state === "completed" ? "completed" : state === "cancelled" ? "cancelled" : "failed",
+          );
         }
         await flush(task, run);
       }

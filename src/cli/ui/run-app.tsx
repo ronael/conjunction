@@ -43,6 +43,8 @@ function StepIcon({ status, spinner }: { status: ChecklistStep["status"]; spinne
       return <Text color="green">✓</Text>;
     case "failed":
       return <Text color="red">✗</Text>;
+    case "cancelled":
+      return <Text color="yellow">■</Text>;
     case "active":
       return <Text>{spinner}</Text>;
     case "pending":

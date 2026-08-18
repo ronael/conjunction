@@ -21,7 +21,7 @@ export interface VerifyItem {
   stderrTail?: string[];
 }
 
-export type StepStatus = "pending" | "active" | "done" | "failed";
+export type StepStatus = "pending" | "active" | "done" | "failed" | "cancelled";
 
 /** One row of the Daytona-style phase checklist. */
 export interface ChecklistStep {
@@ -65,6 +65,7 @@ export class RunModel {
   #driverStepCount = 0;
   #workerStepCount = 0;
   #currentWorkerStepId = "";
+  #nextVerificationIsFinal = false;
 
   /** Pre-seeded by the caller from the configured verify commands. */
   verifyItems: VerifyItem[] = [];
@@ -124,9 +125,7 @@ export class RunModel {
     this.phase = "agent";
 
     this.#completeStep("workspace", this.branch);
-    if (this.workflow === "quality") {
-      this.#startQualityDriver();
-    } else {
+    if (this.workflow !== "quality") {
       this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
     }
     this.#emit();
@@ -172,14 +171,15 @@ export class RunModel {
     }
     // skip the verification step entirely when nothing is configured
     if (this.verifyItems.length > 0) {
+      const isFinal = this.#nextVerificationIsFinal;
+      this.#nextVerificationIsFinal = false;
       this.#startStep({
         id: `verification-${this.#verifyRound}`,
-        label:
-          this.workflow === "quality"
-            ? `Verification #${this.#verifyRound}`
-            : this.#verifyRound === 1
-              ? "Verification"
-              : "Verification (attempt 2)",
+        label: isFinal
+          ? "Final verification"
+          : this.#verifyRound === 1
+            ? "Verification"
+            : "Verification (attempt 2)",
       });
     }
     // reset for a fresh pass (initial run or the post-correction re-check)
@@ -280,9 +280,15 @@ export class RunModel {
   }
 
   /** Quality workflow: a Worker invocation finished. */
-  workerFinished(): void {
+  workerFinished(outcome: "completed" | "failed" | "cancelled"): void {
     if (this.#currentWorkerStepId.length > 0) {
-      this.#completeStep(this.#currentWorkerStepId);
+      if (outcome === "completed") {
+        this.#completeStep(this.#currentWorkerStepId);
+      } else if (outcome === "failed") {
+        this.#failStep(this.#currentWorkerStepId, "failed");
+      } else {
+        this.#cancelStep(this.#currentWorkerStepId);
+      }
     }
     this.#emit();
   }
@@ -298,11 +304,7 @@ export class RunModel {
 
   /** Quality workflow: the final verification before review is starting. */
   finalVerificationStarted(): void {
-    this.phase = "verification";
-    this.#verifyRound++;
-    this.#startStep({ id: `verification-${this.#verifyRound}`, label: "Final verification" });
-    this.verifyItems = this.verifyItems.map((item) => ({ name: item.name, status: "pending" }));
-    this.#emit();
+    this.#nextVerificationIsFinal = true;
   }
 
   /** Lot 4: the post-run Observer is starting. */
@@ -432,5 +434,14 @@ export class RunModel {
     }
     step.status = "failed";
     step.detail = detail;
+  }
+
+  #cancelStep(id: string): void {
+    const step = this.steps.find((candidate) => candidate.id === id);
+    if (step === undefined) {
+      return;
+    }
+    step.status = "cancelled";
+    step.detail = "cancelled";
   }
 }
