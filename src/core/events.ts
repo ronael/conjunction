@@ -52,6 +52,9 @@ export interface InvocationCompletedEvent
 export interface InvocationFailedEvent
   extends EventBase<"invocation.failed", InvocationEventPayload>, RunScoped {}
 
+export interface InvocationCancelledEvent
+  extends EventBase<"invocation.cancelled", InvocationEventPayload>, RunScoped {}
+
 export interface AgentOutputEvent
   extends
     EventBase<"agent.output", { invocationId: string; stream: "stdout" | "stderr"; chunk: string }>,
@@ -127,6 +130,7 @@ export type ConjunctionEvent =
   | InvocationStartedEvent
   | InvocationCompletedEvent
   | InvocationFailedEvent
+  | InvocationCancelledEvent
   | AgentStartedEvent
   | AgentOutputEvent
   | AgentCompletedEvent

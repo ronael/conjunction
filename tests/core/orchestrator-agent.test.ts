@@ -275,6 +275,11 @@ describe("Orchestrator.executeRun", () => {
     await orchestrator.executeRun(run.id, { timeoutMs: 5_000 });
     expect(run.state).toBe("cancelled");
     expect(orchestrator.events.ofType("run.cancelled")).toHaveLength(1);
+    expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
+    expect(run.invocations?.[0]).toMatchObject({
+      state: "cancelled",
+      terminationReason: "aborted",
+    });
   });
 
   it("requires an agent dependency", async () => {
@@ -428,5 +433,121 @@ describe("Orchestrator.invokeAgent role read-only invariants", () => {
     expect(inputs[0]?.readOnly).toBeUndefined();
     expect(run.invocations?.[0]).toMatchObject({ role: "worker" });
     expect(run.invocations?.[0]?.readOnly).toBeUndefined();
+  });
+});
+
+describe("Orchestrator invocation lifecycle", () => {
+  it("emits invocation.cancelled when a worker is aborted", async () => {
+    const { adapter } = stubAgent(() => {}, { exitCode: null, aborted: true });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+
+    expect(run.invocations?.[0]).toMatchObject({
+      role: "worker",
+      state: "cancelled",
+      terminationReason: "aborted",
+    });
+    expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
+  });
+
+  it("emits invocation.cancelled when a driver is aborted", async () => {
+    const { adapter } = stubAgent(() => {}, { exitCode: null, aborted: true });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.invokeAgent(run.id, {
+      role: "driver",
+      instructions: "decide",
+      timeoutMs: 1_000,
+      outputSchema: { type: "object" },
+    });
+
+    expect(run.invocations?.[0]).toMatchObject({
+      role: "driver",
+      state: "cancelled",
+      terminationReason: "aborted",
+    });
+    expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
+  });
+
+  it("emits invocation.cancelled when a critic is aborted", async () => {
+    const { adapter } = stubAgent(() => {}, { exitCode: null, aborted: true });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.invokeAgent(run.id, {
+      role: "critic",
+      instructions: "review",
+      timeoutMs: 1_000,
+      outputSchema: { type: "object" },
+    });
+
+    expect(run.invocations?.[0]).toMatchObject({
+      role: "critic",
+      state: "cancelled",
+      terminationReason: "aborted",
+    });
+    expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
+  });
+
+  it("emits invocation.cancelled when an observer is aborted", async () => {
+    const inputs: AgentRunInput[] = [];
+    const adapter: AgentAdapter = {
+      id: "stub-agent",
+      capabilities: () => ({
+        supportsReadOnly: true,
+        supportsStructuredOutput: true,
+        reasoningEffort: [],
+      }),
+      detect: () => Promise.resolve({ available: true }),
+      run: (input) => {
+        inputs.push(input);
+        const aborted = inputs.length === 2;
+        const result: AgentRunResult = {
+          exitCode: aborted ? null : 0,
+          timedOut: false,
+          aborted,
+        };
+        if (!aborted) {
+          result.lastMessage = "done";
+        }
+        return Promise.resolve(result);
+      },
+    };
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    run.verificationResult = { passed: true, results: [] };
+    run.state = "completed";
+    run.completedAt = "2026-01-01T00:00:05.000Z";
+
+    await orchestrator.observeRun(run.id, { timeoutMs: 1_000, target: { runtime: "stub-agent" } });
+
+    expect(run.invocations?.at(-1)).toMatchObject({
+      role: "observer",
+      state: "cancelled",
+      terminationReason: "aborted",
+    });
+    expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
+    expect(run.state).toBe("completed");
   });
 });

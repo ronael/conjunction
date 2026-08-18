@@ -86,6 +86,7 @@ export {
   type InvocationReport,
   type RunMetrics,
   type RunReport,
+  type RunUsageReport,
   type VerificationReport,
 } from "./report.js";
 export {
@@ -118,6 +119,7 @@ export {
   type CorrectionCompletedEvent,
   type CorrectionStartedEvent,
   type DriverDecisionEvent,
+  type InvocationCancelledEvent,
   type InvocationCompletedEvent,
   type InvocationCreatedEvent,
   type InvocationEventPayload,

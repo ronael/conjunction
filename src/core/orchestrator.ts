@@ -544,7 +544,12 @@ export class Orchestrator {
       invocation.terminationReason = "completed";
     }
     this.#emit({
-      type: invocation.state === "completed" ? "invocation.completed" : "invocation.failed",
+      type:
+        invocation.state === "completed"
+          ? "invocation.completed"
+          : invocation.state === "cancelled"
+            ? "invocation.cancelled"
+            : "invocation.failed",
       taskId: run.taskId,
       runId: run.id,
       payload: this.#invocationPayload(invocation),
@@ -903,7 +908,7 @@ export class Orchestrator {
       invocation.state = "cancelled";
       invocation.terminationReason = "aborted";
       this.#emit({
-        type: "invocation.failed",
+        type: "invocation.cancelled",
         taskId: run.taskId,
         runId: run.id,
         payload: this.#invocationPayload(invocation),

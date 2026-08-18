@@ -28,14 +28,17 @@ describe("buildRunReport", () => {
     expect(formatRunReport(report)).toContain("readOnly=false workspaceWrite=true");
   });
 
-  it("aggregates only reliable adapter-provided usage and leaves missing values unknown", () => {
+  it("aggregates only reliable adapter-provided usage and exposes coverage explicitly", () => {
     const run = completedRun();
     const report = buildRunReport({ run, task });
 
     expect(report.invocations[0]?.usageKnown).toBe(false);
     expect(report.invocations[1]?.usageKnown).toBe(true);
     expect(report.metrics.usage).toEqual({
-      costUsd: 0.028,
+      coverage: "partial",
+      knownInvocations: 1,
+      totalInvocations: 4,
+      estimatedCostUsd: 0.028,
       inputTokens: 1200,
       outputTokens: 240,
       cacheReadInputTokens: 800,
@@ -59,7 +62,7 @@ describe("buildRunReport", () => {
     expect(report.metrics.targetSwitches).toBe(1);
     expect(report.metrics.effortEscalations).toBe(1);
     expect(report.metrics.verificationDurationMs).toBe(1500);
-    expect(report.acceptanceCoverage.status).toBe("demonstrated");
+    expect(report.acceptanceCoverage.status).toBe("not_demonstrated");
     expect(report.events.types).toMatchObject({
       "invocation.created": 1,
       "invocation.completed": 1,
@@ -74,6 +77,67 @@ describe("buildRunReport", () => {
     expect(packet).toContain('"workspaceWrite": true');
     expect(packet).toContain('"usageKnown": false');
     expect(packet).not.toContain("agent prompt");
+  });
+
+  it("reports usage coverage as unknown when no invocation exposes telemetry", () => {
+    const run = completedRun();
+    run.invocations = (run.invocations ?? []).map((invocation) => ({
+      ...invocation,
+      outcome: { exitCode: 0, timedOut: false, aborted: false, summary: "done" },
+    }));
+    const report = buildRunReport({ run, task });
+
+    expect(report.metrics.usage.coverage).toBe("unknown");
+    expect(report.metrics.usage.knownInvocations).toBe(0);
+    expect(report.metrics.usage.totalInvocations).toBe(4);
+    expect(report.metrics.usage.estimatedCostUsd).toBeNull();
+  });
+
+  it("reports usage coverage as complete when every invocation exposes telemetry", () => {
+    const run = completedRun();
+    run.invocations = (run.invocations ?? []).map((invocation) => ({
+      ...invocation,
+      outcome: {
+        exitCode: 0,
+        timedOut: false,
+        aborted: false,
+        summary: "done",
+        usage: { costUsd: 0.01, tokens: { inputTokens: 10, outputTokens: 5 } },
+      },
+    }));
+    const report = buildRunReport({ run, task });
+
+    expect(report.metrics.usage.coverage).toBe("complete");
+    expect(report.metrics.usage.knownInvocations).toBe(4);
+    expect(report.metrics.usage.totalInvocations).toBe(4);
+    expect(report.metrics.usage.estimatedCostUsd).toBeCloseTo(0.04);
+  });
+
+  it("reports usage coverage as partial for a mixed known/unknown invocation set", () => {
+    const run = completedRun();
+    const report = buildRunReport({ run, task });
+
+    expect(report.metrics.usage.coverage).toBe("partial");
+    expect(report.metrics.usage.knownInvocations).toBe(1);
+    expect(report.metrics.usage.totalInvocations).toBe(4);
+    expect(report.metrics.usage.estimatedCostUsd).toBe(0.028);
+  });
+
+  it("includes usage coverage in the observer packet", () => {
+    const packet = buildObserverPacket(buildRunReport({ run: completedRun(), task }));
+
+    expect(packet).toContain('"coverage": "partial"');
+    expect(packet).toContain('"knownInvocations": 1');
+    expect(packet).toContain('"totalInvocations": 4');
+  });
+
+  it("keeps acceptance coverage not_demonstrated even when verification passes", () => {
+    const run = completedRun();
+    const report = buildRunReport({ run, task });
+
+    expect(run.verificationResult?.passed).toBe(true);
+    expect(report.acceptanceCoverage.status).toBe("not_demonstrated");
+    expect(report.acceptanceCoverage.reason).toContain("no explicit mapping");
   });
 });
 

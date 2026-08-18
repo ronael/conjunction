@@ -37,6 +37,22 @@ export interface RunReport {
   events: { count: number; types: Record<string, number> };
 }
 
+export interface RunUsageReport {
+  /** How completely the run's invocations expose structured usage telemetry. */
+  coverage: "unknown" | "partial" | "complete";
+  /** Invocations whose adapter reported any structured usage object. */
+  knownInvocations: number;
+  /** Total invocations in the run. */
+  totalInvocations: number;
+  /** Sum of runtime-reported costs, when any. Not an official bill. */
+  estimatedCostUsd: number | null;
+  /** Aggregate known token counts; null when no invocation reported tokens. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+}
+
 export interface RunMetrics {
   durationMs: number | null;
   invocationCount: number;
@@ -45,13 +61,7 @@ export interface RunMetrics {
   targetSwitches: number;
   effortEscalations: number;
   verificationDurationMs: number | null;
-  usage: {
-    costUsd: number | null;
-    inputTokens: number | null;
-    outputTokens: number | null;
-    cacheReadInputTokens: number | null;
-    cacheCreationInputTokens: number | null;
-  };
+  usage: RunUsageReport;
 }
 
 export interface InvocationReport {
@@ -190,9 +200,10 @@ export function formatRunReport(report: RunReport): string {
     `verification       ${formatMs(report.metrics.verificationDurationMs)}`,
     "",
     "Usage",
+    `coverage           ${report.metrics.usage.coverage} (${report.metrics.usage.knownInvocations}/${report.metrics.usage.totalInvocations} invocations)`,
+    `estimated cost known ${formatUsd(report.metrics.usage.estimatedCostUsd)}`,
     `tokens in          ${formatNullable(report.metrics.usage.inputTokens)}`,
     `tokens out         ${formatNullable(report.metrics.usage.outputTokens)}`,
-    `cost USD           ${formatNullable(report.metrics.usage.costUsd)}`,
     "",
     "Invocations",
     `${report.metrics.invocationCount} total, ${report.metrics.targetSwitches} target switch(es), ${report.metrics.effortEscalations} effort escalation(s)`,
@@ -250,10 +261,11 @@ function invocationReport(invocation: Invocation): InvocationReport {
   };
 }
 
-function aggregateUsage(invocations: readonly Invocation[]): RunMetrics["usage"] {
-  let any = false;
+function aggregateUsage(invocations: readonly Invocation[]): RunUsageReport {
+  const totalInvocations = invocations.length;
+  let knownInvocations = 0;
   const totals = {
-    costUsd: 0,
+    estimatedCostUsd: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadInputTokens: 0,
@@ -264,19 +276,29 @@ function aggregateUsage(invocations: readonly Invocation[]): RunMetrics["usage"]
     if (usage === undefined) {
       continue;
     }
-    any = true;
-    totals.costUsd += usage.costUsd ?? 0;
+    knownInvocations++;
+    totals.estimatedCostUsd += usage.costUsd ?? 0;
     totals.inputTokens += usage.tokens?.inputTokens ?? 0;
     totals.outputTokens += usage.tokens?.outputTokens ?? 0;
     totals.cacheReadInputTokens += usage.tokens?.cacheReadInputTokens ?? 0;
     totals.cacheCreationInputTokens += usage.tokens?.cacheCreationInputTokens ?? 0;
   }
+  const coverage: RunUsageReport["coverage"] =
+    knownInvocations === 0
+      ? "unknown"
+      : knownInvocations === totalInvocations
+        ? "complete"
+        : "partial";
+  const anyKnown = knownInvocations > 0;
   return {
-    costUsd: any ? totals.costUsd : null,
-    inputTokens: any ? totals.inputTokens : null,
-    outputTokens: any ? totals.outputTokens : null,
-    cacheReadInputTokens: any ? totals.cacheReadInputTokens : null,
-    cacheCreationInputTokens: any ? totals.cacheCreationInputTokens : null,
+    coverage,
+    knownInvocations,
+    totalInvocations,
+    estimatedCostUsd: anyKnown ? totals.estimatedCostUsd : null,
+    inputTokens: anyKnown ? totals.inputTokens : null,
+    outputTokens: anyKnown ? totals.outputTokens : null,
+    cacheReadInputTokens: anyKnown ? totals.cacheReadInputTokens : null,
+    cacheCreationInputTokens: anyKnown ? totals.cacheCreationInputTokens : null,
   };
 }
 
@@ -338,11 +360,15 @@ function reportWarnings(
 }
 
 function acceptanceCoverage(run: Run): RunReport["acceptanceCoverage"] {
-  if (run.verificationResult?.passed === true) {
-    return { status: "demonstrated", reason: "latest deterministic verification passed" };
-  }
   if (run.verificationResult?.passed === false) {
     return { status: "failed", reason: "latest deterministic verification failed" };
+  }
+  if (run.verificationResult?.passed === true) {
+    return {
+      status: "not_demonstrated",
+      reason:
+        "verification passed, but V1 has no explicit mapping from acceptance criteria to evidence",
+    };
   }
   return { status: "not_demonstrated", reason: "no deterministic verification result recorded" };
 }
@@ -376,6 +402,10 @@ function formatMs(ms: number | null): string {
 
 function formatNullable(value: number | null): string {
   return value === null ? "unknown" : String(Number(value.toFixed(6)));
+}
+
+function formatUsd(value: number | null): string {
+  return value === null ? "unknown" : `$${Number(value.toFixed(6))}`;
 }
 
 function coverageSymbol(status: RunReport["acceptanceCoverage"]["status"]): string {

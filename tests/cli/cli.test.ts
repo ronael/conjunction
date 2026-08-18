@@ -191,7 +191,7 @@ describe("cli run (stub adapter, real git repo)", () => {
         usageKnown: false,
       },
     ]);
-    expect(report.acceptanceCoverage.status).toBe("demonstrated");
+    expect(report.acceptanceCoverage.status).toBe("not_demonstrated");
 
     const humanIo = capture();
     const humanCode = await cli(["report", runId ?? "", "--repo", repo], {
@@ -201,6 +201,8 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(humanCode).toBe(0);
     expect(humanIo.text()).toContain(`Run #${runId}`);
     expect(humanIo.text()).toContain("readOnly=false workspaceWrite=true");
+    expect(humanIo.text()).toContain("coverage           unknown");
+    expect(humanIo.text()).toContain("estimated cost known unknown");
     expect(humanIo.text()).toContain("tokens in          unknown");
   });
 

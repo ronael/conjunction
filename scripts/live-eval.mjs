@@ -39,7 +39,6 @@ try {
   writeFileSync(path.join(repo, "README.md"), "# live eval\n");
   git(["add", "README.md"]);
   git(["commit", "-m", "initial commit"]);
-  const mainBefore = git(["rev-parse", "main"]).stdout.trim();
 
   const runArgs = [
     bin,
@@ -74,6 +73,9 @@ try {
   addOptional(runArgs, "--critic-model", criticModel);
   addOptional(runArgs, "--observer-model", observerModel);
   writeFileSync(path.join(repo, "BRIEF.md"), brief);
+  git(["add", "BRIEF.md"]);
+  git(["commit", "-m", "live eval brief"]);
+  const mainBefore = git(["rev-parse", "main"]).stdout.trim();
 
   const started = Date.now();
   const run = node(runArgs.slice(1), { timeoutMs: Number(timeout) * 60_000 + 60_000 });
@@ -104,9 +106,24 @@ try {
       `invocation guard exceeded: ${parsedReport.metrics.invocationCount} > ${maxInvocations}`,
     );
   }
-  if (maxCostUsd !== undefined && parsedReport.metrics.usage.costUsd !== null) {
-    if (parsedReport.metrics.usage.costUsd > maxCostUsd) {
-      throw new Error(`cost guard exceeded: ${parsedReport.metrics.usage.costUsd} > ${maxCostUsd}`);
+  if (parsedReport.metrics.usage.coverage === "partial") {
+    console.log(
+      `budget guard: partial — ${parsedReport.metrics.usage.knownInvocations}/${parsedReport.metrics.usage.totalInvocations} invocations reported usage`,
+    );
+  }
+  if (maxCostUsd !== undefined) {
+    const estimatedCost = parsedReport.metrics.usage.estimatedCostUsd;
+    if (estimatedCost !== null) {
+      if (estimatedCost > maxCostUsd) {
+        throw new Error(`cost guard exceeded: ${estimatedCost} > ${maxCostUsd}`);
+      }
+      if (parsedReport.metrics.usage.coverage === "partial") {
+        console.log(
+          `cost guard: known estimated cost ${estimatedCost} is under threshold ${maxCostUsd}, but coverage is partial`,
+        );
+      }
+    } else if (parsedReport.metrics.usage.coverage !== "unknown") {
+      console.log("cost guard: no estimated cost known for any invocation");
     }
   }
   const knownTokens =
@@ -118,6 +135,41 @@ try {
   const worktreePath = runJson.run.workspacePath;
   const resultText = readFileSync(path.join(worktreePath, "live-eval-result.txt"), "utf8");
   assertEqual(resultText, "conjunction live eval ok\n", "unexpected worktree file content");
+
+  const land = node(["land", runId, "--repo", repo]);
+  process.stdout.write(land.stdout);
+  process.stderr.write(land.stderr);
+  if (land.status !== 0) {
+    throw new Error(`conjunction land failed with exit ${land.status}`);
+  }
+  assertEqual(
+    git(["rev-parse", "main"]).stdout.trim(),
+    mainBefore,
+    "main branch changed after land",
+  );
+  const landedFilePath = path.join(repo, "live-eval-result.txt");
+  const landedText = readFileSync(landedFilePath, "utf8");
+  assertEqual(landedText, "conjunction live eval ok\n", "unexpected landed file content");
+
+  const landedRunJson = JSON.parse(
+    readFileSync(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
+  );
+  if (landedRunJson.run.landed === undefined) {
+    throw new Error("run.landed was not persisted after land");
+  }
+  const eventLines = readFileSync(
+    path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`),
+    "utf8",
+  )
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  const landedEvents = eventLines
+    .map((line) => JSON.parse(line))
+    .filter((event) => event.type === "run.landed");
+  if (landedEvents.length === 0) {
+    throw new Error("no run.landed event found");
+  }
 
   const summary = {
     runId,
@@ -132,7 +184,12 @@ try {
     invocations: parsedReport.metrics.invocationCount,
     verification: parsedReport.verification.latestPassed,
     observerFindings: parsedReport.observer?.findings ?? null,
-    usage: parsedReport.metrics.usage,
+    usage: {
+      coverage: parsedReport.metrics.usage.coverage,
+      knownInvocations: parsedReport.metrics.usage.knownInvocations,
+      totalInvocations: parsedReport.metrics.usage.totalInvocations,
+      estimatedCostUsd: parsedReport.metrics.usage.estimatedCostUsd,
+    },
   };
   console.log(JSON.stringify(summary, null, 2));
 } finally {

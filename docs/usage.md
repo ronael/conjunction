@@ -306,8 +306,8 @@ continues with a warning and no metadata):
 ### `conjunction report <runId>`
 
 Builds a run intelligence report from stored Conjunction facts. The report does
-not parse raw runtime stdout to invent metrics; unavailable usage remains
-`unknown` in human output and `null` in JSON.
+not parse raw runtime stdout to invent metrics; unavailable usage is reported as
+`unknown` coverage, never as zero.
 
 ```bash
 conjunction report <runId> --repo /path/to/repo
@@ -321,12 +321,15 @@ The JSON report includes:
   termination reason and duration;
 - actual invocation permissions (`readOnly`, `workspaceWrite`) derived from the
   invocation, not from runtime capabilities;
-- aggregate usage only when adapters expose reliable structured usage
-  telemetry;
+- usage coverage (`unknown` / `partial` / `complete`), the count of invocations
+  that reported structured telemetry, and aggregate metrics (including
+  `estimatedCostUsd`) only from those known invocations;
 - target switches, effort escalations, correction count and verification
   timings;
 - review and Observer summaries when present;
-- acceptance coverage as `demonstrated`, `failed`, or `not_demonstrated`.
+- conservative acceptance coverage: a passing verification is recorded as
+  `not_demonstrated` unless there is an explicit acceptance-criteria-to-evidence
+  mapping (not implemented in V1).
 
 ## Live Eval
 
@@ -340,9 +343,11 @@ pnpm eval:live
 ```
 
 The script creates a disposable Git repository, runs the `quality` workflow
-through `dist/cli/main.js`, verifies the main branch remains untouched before
-landing, checks the generated worktree, runs deterministic verification, and
-generates the same JSON report as `conjunction report`.
+through `dist/cli/main.js`, checks the generated worktree, runs deterministic
+verification, generates the same JSON report as `conjunction report`, and then
+actually lands the run with `conjunction land` to verify the patch appears
+uncommitted in the main tree, `run.landed` is persisted, and a `run.landed`
+event is recorded.
 
 Defaults:
 
