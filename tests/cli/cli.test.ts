@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   StaticRuntimeRegistry,
@@ -13,7 +13,24 @@ import {
 import { cli } from "../../src/cli/cli.js";
 import { inlineBrief } from "../../src/cli/brief.js";
 import { runTask, selectedRuntimeTargets } from "../../src/cli/run-command.js";
-import { execGit } from "../../src/workspace/index.js";
+import * as tui from "../../src/cli/ui/tui.js";
+import { execGit, LandError } from "../../src/workspace/index.js";
+
+const patchFail = vi.hoisted(() => ({ value: false, error: undefined as Error | undefined }));
+vi.mock("../../src/workspace/index.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../../src/workspace/index.js")>();
+  return {
+    ...mod,
+    generateLandingPatchToFile: vi.fn(
+      (...args: Parameters<typeof mod.generateLandingPatchToFile>) => {
+        if (patchFail.value && patchFail.error !== undefined) {
+          return Promise.reject(patchFail.error);
+        }
+        return mod.generateLandingPatchToFile(...args);
+      },
+    ) as typeof mod.generateLandingPatchToFile,
+  };
+});
 
 const tempDirs: string[] = [];
 
@@ -204,6 +221,44 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(humanIo.text()).toContain("coverage           unknown");
     expect(humanIo.text()).toContain("estimated cost known unknown");
     expect(humanIo.text()).toContain("conjunction land");
+  });
+
+  it("reports landed status after land and does not suggest landing again", async () => {
+    const repo = await makeTempRepo();
+    const runIo = capture();
+
+    const code = await cli(
+      ["run", "create hello.txt", "--repo", repo, "--verify", "test -f hello.txt"],
+      { adapter: fileCreatingStub, out: runIo.out },
+    );
+    expect(code).toBe(0);
+    const [runId] = await storedRunIds(repo);
+    expect(runId).toBeDefined();
+
+    const landCode = await cli(["land", runId ?? "", "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: runIo.out,
+    });
+    expect(landCode).toBe(0);
+
+    const jsonIo = capture();
+    const jsonCode = await cli(["report", runId ?? "", "--repo", repo, "--json"], {
+      adapter: fileCreatingStub,
+      out: jsonIo.out,
+    });
+    expect(jsonCode).toBe(0);
+    const report = JSON.parse(jsonIo.text()) as { landing: { status: string; landed?: unknown } };
+    expect(report.landing.status).toBe("landed");
+    expect(report.landing.landed).toBeDefined();
+
+    const humanIo = capture();
+    const humanCode = await cli(["report", runId ?? "", "--repo", repo], {
+      adapter: fileCreatingStub,
+      out: humanIo.out,
+    });
+    expect(humanCode).toBe(0);
+    expect(humanIo.text()).toContain("landed on main");
+    expect(humanIo.text()).not.toContain("conjunction land");
   });
 
   it("fails (exit 1) when verification fails, run state recorded as failed", async () => {
@@ -1008,6 +1063,47 @@ describe("cli land", () => {
     expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
   });
 
+  it("failed patch generation is non-destructive and retryable", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    const runPath = path.join(repo, ".conjunction", "runs", `${runId}.json`);
+    const eventsPath = path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`);
+    const worktreePath = path.join(repo, ".conjunction", "worktrees", runId);
+
+    patchFail.error = new LandError("patch boom");
+    patchFail.value = true;
+    try {
+      const io1 = capture();
+      const code1 = await cli(["land", runId, "--repo", repo], { out: io1.out });
+      expect(code1).toBe(1);
+      expect(io1.text()).toContain("patch boom");
+
+      // run JSON still exists and is untouched
+      const afterRun = JSON.parse(await readFile(runPath, "utf8")) as {
+        run: { landed?: unknown; state: string };
+      };
+      expect(afterRun.run.state).toBe("completed");
+      expect(afterRun.run.landed).toBeUndefined();
+
+      // events still exist
+      expect(await readFile(eventsPath, "utf8")).toContain("run.completed");
+
+      // worktree and branch still exist
+      await expect(stat(worktreePath)).resolves.toBeDefined();
+      const { stdout: branches } = await execGit(["branch", "--list"], { cwd: repo });
+      expect(branches).toContain(`conjunction/${runId}`);
+    } finally {
+      patchFail.value = false;
+      patchFail.error = undefined;
+    }
+
+    // retry with the real implementation succeeds
+    const io2 = capture();
+    const code2 = await cli(["land", runId, "--repo", repo], { out: io2.out });
+    expect(code2).toBe(0);
+    expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+
   it("warns on reviewer error but proceeds (review is advisory)", async () => {
     const repo = await makeTempRepo();
     const crashingReviewerStub = stubAdapter(async (input) => {
@@ -1250,10 +1346,48 @@ describe("cli run — workflows", () => {
 
   it("skips observer when the run failed before meaningful execution", async () => {
     const repo = await makeTempRepo();
-    const failingStub = stubAdapter(() => Promise.resolve({ exitCode: 1 }));
+    const failingDriverStub = stubAdapter(() => Promise.resolve({ exitCode: 1 }));
+    const workerStub = stubAdapter(async (input) => {
+      await writeFile(path.join(input.workspacePath, "hello.txt"), "hi\n");
+      return {};
+    });
     const observerStub = stubAdapter(() => Promise.resolve({ exitCode: 0, lastMessage: "{}" }));
     const registry = new StaticRuntimeRegistry([
-      { ...failingStub, id: "worker-runtime" },
+      { ...failingDriverStub, id: "driver-runtime" },
+      { ...workerStub, id: "worker-runtime" },
+      { ...observerStub, id: "observer-runtime" },
+    ]);
+    const io = capture();
+    const code = await cli(
+      [
+        "run",
+        "create hello.txt",
+        "--repo",
+        repo,
+        "--plain",
+        "--workflow",
+        "quality",
+        "--verify",
+        "test -f hello.txt",
+        "--driver-runtime",
+        "driver-runtime",
+        "--runtime",
+        "worker-runtime",
+        "--observer-runtime",
+        "observer-runtime",
+      ],
+      { runtimeRegistry: registry, out: io.out },
+    );
+    expect(code).toBe(1);
+    expect(io.text()).toContain("skipped — run failed before meaningful execution");
+  });
+
+  it("runs observer when the worker was attempted but failed", async () => {
+    const repo = await makeTempRepo();
+    const failingWorkerStub = stubAdapter(() => Promise.resolve({ exitCode: 1 }));
+    const observerStub = stubAdapter(() => Promise.resolve({ exitCode: 0, lastMessage: "{}" }));
+    const registry = new StaticRuntimeRegistry([
+      { ...failingWorkerStub, id: "worker-runtime" },
       { ...observerStub, id: "observer-runtime" },
     ]);
     const io = capture();
@@ -1272,7 +1406,8 @@ describe("cli run — workflows", () => {
       { runtimeRegistry: registry, out: io.out },
     );
     expect(code).toBe(1);
-    expect(io.text()).toContain("skipped — run failed before meaningful execution");
+    expect(io.text()).toContain("── observer ──");
+    expect(io.text()).not.toContain("skipped — run failed before meaningful execution");
   });
 
   it("--workflow review runs the independent critic", async () => {
@@ -1429,6 +1564,57 @@ describe("cli run — workflows", () => {
     expect(io.text()).toContain("legacy task");
     expect(io.text()).not.toContain("Workflow");
     expect(io.text()).not.toContain("Brief");
+  });
+
+  it("routes quality to the TUI when stdout is a TTY and --plain is not given", async () => {
+    const repo = await makeTempRepo();
+    const runWithTui = vi.spyOn(tui, "runWithTui").mockResolvedValue(0);
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      const code = await cli(["run", "do it", "--repo", repo, "--workflow", "quality"], {
+        adapter: reviewingStub,
+      });
+      expect(code).toBe(0);
+      expect(runWithTui).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+      runWithTui.mockRestore();
+    }
+  });
+
+  it("forces plain renderer for quality when --plain is given", async () => {
+    const repo = await makeTempRepo();
+    const runWithTui = vi.spyOn(tui, "runWithTui").mockResolvedValue(0);
+    const io = capture();
+    const code = await cli(["run", "do it", "--repo", repo, "--workflow", "quality", "--plain"], {
+      adapter: reviewingStub,
+      out: io.out,
+    });
+    expect(runWithTui).not.toHaveBeenCalled();
+    expect(code).toBe(2);
+    expect(io.text()).toContain("workflow quality requires at least one --verify command");
+    runWithTui.mockRestore();
+  });
+
+  it("forces plain renderer for quality when an output sink is injected", async () => {
+    const repo = await makeTempRepo();
+    const runWithTui = vi.spyOn(tui, "runWithTui").mockResolvedValue(0);
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    const io = capture();
+    try {
+      const code = await cli(["run", "do it", "--repo", repo, "--workflow", "quality"], {
+        adapter: reviewingStub,
+        out: io.out,
+      });
+      expect(runWithTui).not.toHaveBeenCalled();
+      expect(code).toBe(2);
+      expect(io.text()).toContain("workflow quality requires at least one --verify command");
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+      runWithTui.mockRestore();
+    }
   });
 });
 

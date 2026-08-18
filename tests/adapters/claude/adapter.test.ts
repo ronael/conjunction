@@ -280,7 +280,7 @@ describe("ClaudeAdapter.run invocation", () => {
     const result = await adapter.run(baseInput);
     expect(result.error).toEqual({
       category: "provider_overloaded",
-      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+      message: "Claude Code returned 529 Overloaded.",
     });
   });
 
@@ -299,8 +299,19 @@ describe("ClaudeAdapter.run invocation", () => {
     const result = await adapter.run({ ...baseInput, outputSchema: { type: "object" } });
     expect(result.error).toEqual({
       category: "provider_overloaded",
-      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+      message: "Claude Code returned 529 Overloaded.",
     });
+  });
+
+  it("does not claim no workspace changes for a writable worker that errors", async () => {
+    const fake = fakeSpawn((child) => {
+      child.stderr.write("Error: 529 Overloaded");
+      child.exit(1);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, readOnly: false });
+    expect(result.error?.category).toBe("provider_overloaded");
+    expect(result.error?.message).not.toContain("No workspace changes were made");
   });
 
   it("normalizes a timeout", async () => {

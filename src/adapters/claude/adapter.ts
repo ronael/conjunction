@@ -376,7 +376,7 @@ function normalizeClaudeError(input: {
   ) {
     return {
       category: "provider_overloaded",
-      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+      message: "Claude Code returned 529 Overloaded.",
     };
   }
   if (

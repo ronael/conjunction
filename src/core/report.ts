@@ -1,6 +1,6 @@
 import type { ConjunctionEvent } from "./events.js";
 import type { Invocation, ReasoningEffort } from "./invocation.js";
-import type { Run, VerificationRecord } from "./run.js";
+import type { LandedRecord, Run, VerificationRecord } from "./run.js";
 import type { Task } from "./task.js";
 
 export interface RunReport {
@@ -35,6 +35,10 @@ export interface RunReport {
   acceptanceCoverage: {
     status: "demonstrated" | "failed" | "not_demonstrated";
     reason: string;
+  };
+  landing: {
+    status: "not_landed" | "landed";
+    landed?: LandedRecord;
   };
   warnings: string[];
   events: { count: number; types: Record<string, number> };
@@ -187,6 +191,7 @@ export function buildRunReport(input: {
         }
       : {}),
     acceptanceCoverage: acceptanceCoverage(input.run),
+    landing: landingReport(input.run),
     warnings,
     events: { count: events.length, types: eventTypes },
   };
@@ -234,8 +239,8 @@ export function formatRunReport(report: RunReport): string {
     lines.push("", "Observer", observerLine(report.observer));
   }
   lines.push("", "Changes");
-  lines.push(landingLine());
-  if (report.outcome.state === "completed") {
+  lines.push(landingLine(report.landing));
+  if (report.outcome.state === "completed" && report.landing.status === "not_landed") {
     lines.push("", "Next");
     lines.push(`conjunction land ${report.runId}`);
   }
@@ -278,10 +283,19 @@ function observerLine(observer: NonNullable<RunReport["observer"]>): string {
   return `${observer.findings} finding${observer.findings === 1 ? "" : "s"} · ${summary}`;
 }
 
-function landingLine(): string {
-  // The report itself does not know whether the run was landed; that lives on
-  // the persisted Run object and is shown via the CLI's summary, not here.
+function landingLine(landing: RunReport["landing"]): string {
+  if (landing.status === "landed" && landing.landed !== undefined) {
+    const record = landing.landed;
+    return `landed on ${record.targetBranch} @ ${record.targetCommit.slice(0, 8)} at ${record.landedAt}`;
+  }
   return "workspace isolated — run `conjunction land <runId>` to apply changes";
+}
+
+function landingReport(run: Run): RunReport["landing"] {
+  if (run.landed !== undefined) {
+    return { status: "landed", landed: run.landed };
+  }
+  return { status: "not_landed" };
 }
 
 function invocationReport(invocation: Invocation): InvocationReport {

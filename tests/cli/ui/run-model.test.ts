@@ -3,13 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { RunReview } from "../../../src/core/index.js";
 import { MAX_OUTPUT_LINES, RunModel } from "../../../src/cli/ui/run-model.js";
 
-function modelWithContext(): RunModel {
+function modelWithContext(workflow: "single" | "quality" = "single"): RunModel {
   const model = new RunModel();
   model.setContext({
     run: {
       id: "a1b2c3d4-full-run-id",
       taskId: "task-1",
       runtime: "stub",
+      workflow,
       createdAt: "t0",
       state: "running",
       attempts: [],
@@ -365,5 +366,79 @@ describe("RunModel correction phase (lot 6)", () => {
       { name: "typecheck", status: "pending" },
       { name: "test", status: "pending" },
     ]);
+  });
+});
+
+describe("RunModel quality workflow steps", () => {
+  it("projects driver -> worker -> verify -> driver -> accept -> final verify -> review -> observer", () => {
+    const model = modelWithContext("quality");
+    model.verifyItems = [{ name: "test", status: "pending" }];
+
+    expect(model.steps.map((s) => [s.id, s.status])).toEqual([
+      ["workspace", "done"],
+      ["driver-1", "active"],
+    ]);
+
+    model.driverStarted();
+    // driverStarted starts a new driver step and completes any active worker step
+    expect(model.steps.find((s) => s.id === "driver-1")?.status).toBe("active");
+
+    model.driverDecision({
+      action: "delegate",
+      targetId: "worker",
+      objective: "implement",
+      reason: "go",
+    } as never);
+    expect(model.steps.find((s) => s.id === "driver-1")?.status).toBe("done");
+    expect(model.steps.find((s) => s.id === "worker-1")?.status).toBe("active");
+
+    model.workerFinished();
+    expect(model.steps.find((s) => s.id === "worker-1")?.status).toBe("done");
+
+    model.driverStarted();
+    expect(model.steps.find((s) => s.id === "driver-2")?.status).toBe("active");
+
+    model.driverDecision({ action: "verify", reason: "check" } as never);
+    expect(model.steps.find((s) => s.id === "driver-2")?.status).toBe("done");
+
+    model.startVerification();
+    expect(model.steps.find((s) => s.id === "verification-1")?.status).toBe("active");
+
+    model.commandStarted({ name: "test", command: "test", args: [] });
+    model.commandFinished({
+      name: "test",
+      command: "test",
+      args: [],
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: 100,
+      timedOut: false,
+    });
+    model.verificationFinished(true);
+    expect(model.steps.find((s) => s.id === "verification-1")?.status).toBe("done");
+
+    model.driverStarted();
+    expect(model.steps.find((s) => s.id === "driver-3")?.status).toBe("active");
+
+    model.driverDecision({ action: "accept", reason: "green" } as never);
+    expect(model.steps.find((s) => s.id === "driver-3")?.status).toBe("done");
+
+    model.finalVerificationStarted();
+    expect(model.steps.find((s) => s.id === "verification-2")?.status).toBe("active");
+
+    model.verificationFinished(true);
+    model.startReview();
+    expect(model.steps.find((s) => s.id === "review")?.status).toBe("active");
+
+    model.finishReview({
+      summary: "ok",
+      findings: [],
+      structured: true,
+      completedAt: "t2",
+      agentResult: { exitCode: 0, timedOut: false, aborted: false },
+    });
+    model.observerStarted();
+    expect(model.steps.find((s) => s.id === "observer")?.status).toBe("active");
   });
 });

@@ -82,9 +82,10 @@ export function worktreePathForRun(repoRoot: string, runId: string): string {
  * times; never duplicates the entry and never removes existing rules.
  */
 export async function ensureConjunctionExcluded(repoRoot: string): Promise<void> {
-  const gitInfoDir = path.join(repoRoot, ".git", "info");
+  const { stdout } = await execGit(["rev-parse", "--git-path", "info/exclude"], { cwd: repoRoot });
+  const excludePath = path.resolve(repoRoot, stdout.trim());
+  const gitInfoDir = path.dirname(excludePath);
   await mkdir(gitInfoDir, { recursive: true });
-  const excludePath = path.join(gitInfoDir, "exclude");
   let content = "";
   try {
     content = await readFile(excludePath, "utf8");

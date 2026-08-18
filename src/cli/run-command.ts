@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type {
   ExecutionTarget,
+  DriverDecisionRecord,
   DriverLimits,
   Orchestrator,
   ReasoningEffort,
@@ -167,6 +168,16 @@ export interface RunObserver {
   /** Once, right after the workspace exists. */
   context?(ctx: { run: Run; task: Task; repoRoot: string; storeDir: string }): void;
   agentOutput?(chunk: string, stream: "stdout" | "stderr"): void;
+  /** Quality workflow: the read-only Driver invocation is starting. */
+  driverStarted?(): void;
+  /** Quality workflow: the Driver produced a parsed decision. */
+  driverDecision?(decision: DriverDecisionRecord): void;
+  /** Quality workflow: the current Worker invocation finished. */
+  workerFinished?(): void;
+  /** Quality workflow: the Driver accepted the implementation. */
+  driverAccepted?(): void;
+  /** Quality workflow: the final verification before review is starting. */
+  finalVerificationStarted?(): void;
   verificationStarted?(): void;
   /** Verification finished (either round); `passed` is the aggregate outcome. */
   verificationFinished?(passed: boolean): void;
@@ -178,6 +189,8 @@ export interface RunObserver {
   reviewStarted?(): void;
   /** Lot 7: reviewer done (possibly with an advisory error). */
   reviewFinished?(review: RunReview): void;
+  /** Lot 4: the post-run Observer is starting. */
+  observerStarted?(): void;
 }
 
 export interface RunTaskDeps {
@@ -583,9 +596,13 @@ function isTerminal(run: Run): boolean {
  * any worker ran) avoids extra cost/time repeating the same provider outage.
  */
 export function runHasMeaningfulExecution(run: Run): boolean {
-  const workerCompleted = (run.invocations ?? []).some(
-    (invocation) => invocation.role === "worker" && invocation.state === "completed",
+  const workerAttempted = (run.invocations ?? []).some(
+    (invocation) =>
+      invocation.role === "worker" &&
+      (invocation.state === "completed" ||
+        invocation.state === "failed" ||
+        invocation.state === "cancelled"),
   );
   const verificationRan = (run.verificationHistory ?? []).length > 0;
-  return workerCompleted || verificationRan;
+  return workerAttempted || verificationRan;
 }

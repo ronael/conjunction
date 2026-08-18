@@ -141,6 +141,7 @@ export async function runQualityTask(
       });
 
       out("\n-- driver --\n");
+      observer?.driverStarted?.();
       const lastWorker = lastWritableInvocation(run);
       const driverInvoke = await orchestrator.invokeAgent(run.id, {
         role: "driver",
@@ -174,6 +175,7 @@ export async function runQualityTask(
         driverInvoke.invocation.id,
         parsed.decision,
       );
+      observer?.driverDecision?.(decision);
       await flush(task, run);
 
       if (decision.action === "stop") {
@@ -198,11 +200,13 @@ export async function runQualityTask(
         }
         run.quality.acceptedDecisionId = decision.id;
         run.result = { summary: `driver accepted: ${decision.reason}` };
+        observer?.driverAccepted?.();
         out(stepLine("✓", "Driver accepted", decision.reason));
         await flush(task, run);
 
         if (workflowIncludes(options.workflow, "critic")) {
           out("\n-- final verification --\n");
+          observer?.finalVerificationStarted?.();
           observer?.verificationStarted?.();
           await orchestrator.verifyRun(run.id, { review: true });
           observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
@@ -308,6 +312,8 @@ export async function runQualityTask(
             break;
           }
           throw error;
+        } finally {
+          observer?.workerFinished?.();
         }
         await flush(task, run);
       }
@@ -339,6 +345,7 @@ export async function runQualityTask(
     runHasMeaningfulExecution(run);
   if (observerUseful) {
     out("\n-- observer --\n");
+    observer?.observerStarted?.();
     try {
       await orchestrator.observeRun(run.id, {
         timeoutMs: options.timeoutMinutes * 60_000,

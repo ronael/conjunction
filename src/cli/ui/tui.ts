@@ -86,6 +86,11 @@ export async function runWithTui(
     observer: {
       context: (ctx) => model.setContext(ctx),
       agentOutput: (chunk, stream) => model.appendOutput(chunk, stream),
+      driverStarted: () => model.driverStarted(),
+      driverDecision: (decision) => model.driverDecision(decision),
+      workerFinished: () => model.workerFinished(),
+      driverAccepted: () => model.driverAccepted(),
+      finalVerificationStarted: () => model.finalVerificationStarted(),
       verificationStarted: () => model.startVerification(),
       verificationFinished: (passed) => model.verificationFinished(passed),
       commandStarted: (command) => model.commandStarted(command),
@@ -93,6 +98,7 @@ export async function runWithTui(
       correctionStarted: (failedCommands) => model.startCorrection(failedCommands),
       reviewStarted: () => model.startReview(),
       reviewFinished: (review) => model.finishReview(review),
+      observerStarted: () => model.observerStarted(),
     },
   });
 

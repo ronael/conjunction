@@ -139,6 +139,34 @@ describe("buildRunReport", () => {
     expect(report.acceptanceCoverage.status).toBe("not_demonstrated");
     expect(report.acceptanceCoverage.reason).toContain("no explicit mapping");
   });
+
+  it("reports landing status as not_landed and suggests the land command", () => {
+    const run = completedRun();
+    const report = buildRunReport({ run, task });
+
+    expect(report.landing.status).toBe("not_landed");
+    expect(report.landing.landed).toBeUndefined();
+    const text = formatRunReport(report);
+    expect(text).toContain("workspace isolated");
+    expect(text).toContain("conjunction land run-1");
+  });
+
+  it("reports landing status as landed and does not suggest landing again", () => {
+    const run = completedRun();
+    run.landed = {
+      landedAt: "2026-01-01T00:01:00.000Z",
+      targetBranch: "main",
+      targetCommit: "abc123def456",
+      patchPath: "/tmp/run-1.landing.patch",
+    };
+    const report = buildRunReport({ run, task });
+
+    expect(report.landing.status).toBe("landed");
+    expect(report.landing.landed).toEqual(run.landed);
+    const text = formatRunReport(report);
+    expect(text).toContain("landed on main @ abc123de");
+    expect(text).not.toContain("conjunction land run-1");
+  });
 });
 
 function completedRun(): Run {

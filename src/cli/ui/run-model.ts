@@ -1,4 +1,4 @@
-import type { Run, RunReview, RunState, Task } from "../../core/index.js";
+import type { DriverDecisionRecord, Run, RunReview, RunState, Task } from "../../core/index.js";
 import { findingsSummary, formatDuration } from "../format.js";
 import type { CommandResult, VerificationCommand } from "../../verification/index.js";
 import type { RunTaskResult } from "../run-command.js";
@@ -61,6 +61,11 @@ export class RunModel {
   #stepStartedAt = new Map<string, number>([["workspace", Date.now()]]);
   #verifyRound = 0;
 
+  /** Quality workflow step counters (TUI projection only). */
+  #driverStepCount = 0;
+  #workerStepCount = 0;
+  #currentWorkerStepId = "";
+
   /** Pre-seeded by the caller from the configured verify commands. */
   verifyItems: VerifyItem[] = [];
 
@@ -120,7 +125,7 @@ export class RunModel {
 
     this.#completeStep("workspace", this.branch);
     if (this.workflow === "quality") {
-      this.#startStep({ id: "driver", label: "Driver" });
+      this.#startQualityDriver();
     } else {
       this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
     }
@@ -162,12 +167,19 @@ export class RunModel {
   startVerification(): void {
     this.phase = "verification";
     this.#verifyRound++;
-    this.#completeStep(this.#verifyRound === 1 ? "agent-1" : "agent-2");
+    if (this.workflow !== "quality") {
+      this.#completeStep(this.#verifyRound === 1 ? "agent-1" : "agent-2");
+    }
     // skip the verification step entirely when nothing is configured
     if (this.verifyItems.length > 0) {
       this.#startStep({
         id: `verification-${this.#verifyRound}`,
-        label: this.#verifyRound === 1 ? "Verification" : "Verification (attempt 2)",
+        label:
+          this.workflow === "quality"
+            ? `Verification #${this.#verifyRound}`
+            : this.#verifyRound === 1
+              ? "Verification"
+              : "Verification (attempt 2)",
       });
     }
     // reset for a fresh pass (initial run or the post-correction re-check)
@@ -220,6 +232,83 @@ export class RunModel {
     } else {
       this.#completeStep("review", findingsSummary(review.findings));
     }
+    this.#emit();
+  }
+
+  /** Quality workflow: the Driver invocation is starting. */
+  driverStarted(): void {
+    this.phase = "agent";
+    if (this.#currentWorkerStepId.length > 0) {
+      this.#completeStep(this.#currentWorkerStepId);
+      this.#currentWorkerStepId = "";
+    }
+    this.#startQualityDriver();
+    this.#emit();
+  }
+
+  /** Quality workflow: the Driver produced a decision. */
+  driverDecision(decision: DriverDecisionRecord): void {
+    const driverStep = this.#activeQualityDriverStep();
+    if (driverStep === undefined) {
+      return;
+    }
+    switch (decision.action) {
+      case "delegate": {
+        this.#completeStep(driverStep);
+        this.#workerStepCount++;
+        this.#currentWorkerStepId = `worker-${this.#workerStepCount}`;
+        this.#startStep({
+          id: this.#currentWorkerStepId,
+          label: `Worker #${this.#workerStepCount}`,
+        });
+        break;
+      }
+      case "verify": {
+        this.#completeStep(driverStep);
+        break;
+      }
+      case "accept": {
+        this.#completeStep(driverStep);
+        break;
+      }
+      case "stop": {
+        this.#failStep(driverStep, "stopped");
+        break;
+      }
+    }
+    this.#emit();
+  }
+
+  /** Quality workflow: a Worker invocation finished. */
+  workerFinished(): void {
+    if (this.#currentWorkerStepId.length > 0) {
+      this.#completeStep(this.#currentWorkerStepId);
+    }
+    this.#emit();
+  }
+
+  /** Quality workflow: the Driver accepted the implementation. */
+  driverAccepted(): void {
+    const driverStep = this.#activeQualityDriverStep();
+    if (driverStep !== undefined) {
+      this.#completeStep(driverStep);
+    }
+    this.#emit();
+  }
+
+  /** Quality workflow: the final verification before review is starting. */
+  finalVerificationStarted(): void {
+    this.phase = "verification";
+    this.#verifyRound++;
+    this.#startStep({ id: `verification-${this.#verifyRound}`, label: "Final verification" });
+    this.verifyItems = this.verifyItems.map((item) => ({ name: item.name, status: "pending" }));
+    this.#emit();
+  }
+
+  /** Lot 4: the post-run Observer is starting. */
+  observerStarted(): void {
+    this.phase = "done";
+    this.#startStep({ id: "observer", label: "Observer" });
     this.#emit();
   }
 
@@ -305,6 +394,21 @@ export class RunModel {
   #startStep(step: { id: string; label: string }): void {
     this.steps.push({ ...step, status: "active" });
     this.#stepStartedAt.set(step.id, Date.now());
+  }
+
+  #startQualityDriver(): void {
+    this.#driverStepCount++;
+    this.#startStep({
+      id: `driver-${this.#driverStepCount}`,
+      label: `Driver #${this.#driverStepCount}`,
+    });
+  }
+
+  #activeQualityDriverStep(): string | undefined {
+    const step = this.steps.find(
+      (candidate) => candidate.status === "active" && candidate.id.startsWith("driver-"),
+    );
+    return step?.id;
   }
 
   #completeStep(id: string, detail?: string): void {

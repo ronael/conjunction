@@ -48,7 +48,7 @@ usage:
                            [--timeout <minutes>] [--cleanup]
                            [--observer-runtime <id>] [--observer-model <model>]
                            [--observer-effort <level>]
-                           [--plain] [--no-correct] [--review]
+                           [--plain] [--no-correct] [--review] [--debug]
   conjunction land <runId> [--repo <path>] [--branch <target>] [--cleanup]
   conjunction report <runId> [--repo <path>] [--json]
   conjunction status [--repo <path>]
@@ -81,6 +81,8 @@ notes:
   reasoning effort values: ${REASONING_EFFORTS.join("|")}.
   worktrees are preserved by default; --cleanup only removes a CLEAN worktree.
   an interactive TUI renders when stdout is a terminal; --plain forces text.
+  --debug prints full provider envelopes, raw stdout/stderr, and structured
+  packets. It is useful for diagnostics but never enabled by default.
   Ctrl-C cancels the agent gracefully (a second Ctrl-C force-exits).
 `;
 

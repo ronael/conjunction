@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -104,6 +104,28 @@ describe("createRunWorkspace", () => {
     expect(exclude).toContain("node_modules/");
     expect(exclude).toContain("*.log");
     expect(exclude.match(/\.conjunction\//g)).toHaveLength(1);
+  });
+
+  it("resolves .git/info/exclude through git for linked worktrees", async () => {
+    const repo = await makeTempRepo();
+    const linkedWorktree = path.join(repo, "linked-wt");
+    await execGit(["worktree", "add", linkedWorktree], { cwd: repo });
+
+    // .git inside a linked worktree is a file, not a directory
+    const gitFile = path.join(linkedWorktree, ".git");
+    const gitStat = await stat(gitFile);
+    expect(gitStat.isFile()).toBe(true);
+
+    await ensureConjunctionExcluded(linkedWorktree);
+
+    // the entry lands in the real git dir, not a mistaken .git/info path
+    const excludePath = path.join(repo, ".git", "info", "exclude");
+    const exclude = await readFile(excludePath, "utf8");
+    expect(exclude).toContain(".conjunction/");
+
+    // user's .gitignore is untouched
+    const gitignorePath = path.join(repo, ".gitignore");
+    await expect(readFile(gitignorePath, "utf8")).rejects.toThrow();
   });
 
   it("creates branch conjunction/<runId> and a worktree containing HEAD", async () => {
