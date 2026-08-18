@@ -28,6 +28,7 @@ import type {
   RunTaskResult,
   WorkerTargetInput,
 } from "./run-command.js";
+import { runHasMeaningfulExecution } from "./run-command.js";
 import { createRunExecutionSession } from "./run-session.js";
 
 const DEFAULT_DRIVER_TARGET_ID = "worker";
@@ -79,8 +80,8 @@ export async function runQualityTask(
   let session: Awaited<ReturnType<typeof createRunExecutionSession>>;
   try {
     session = await createRunExecutionSession(options, deps, { failedCommandSymbol: "x" });
-  } catch {
-    out(`error: not a git repository: ${options.repoPath}\n`);
+  } catch (error) {
+    out(`error: not a git repository: ${options.repoPath}: ${(error as Error).message}\n`);
     return { exitCode: 2, repoRoot: "", storeDir: "" };
   }
   const { repoRoot, orchestrator, store } = session;
@@ -330,17 +331,23 @@ export async function runQualityTask(
     }
   }
 
-  if (options.observerTarget !== undefined && deps.signal?.aborted !== true && isTerminal(run)) {
+  const observerTarget = options.observerTarget;
+  const observerUseful =
+    observerTarget !== undefined &&
+    deps.signal?.aborted !== true &&
+    isTerminal(run) &&
+    runHasMeaningfulExecution(run);
+  if (observerUseful) {
     out("\n-- observer --\n");
     try {
       await orchestrator.observeRun(run.id, {
         timeoutMs: options.timeoutMinutes * 60_000,
-        target: options.observerTarget,
+        target: observerTarget,
         ...(options.observerReasoningEffort !== undefined
           ? { explicitReasoningEffort: options.observerReasoningEffort }
           : {}),
         ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-        onOutput: (chunk, stream) => {
+        onOutput: (chunk: string, stream: "stdout" | "stderr") => {
           observer?.agentOutput?.(chunk, stream);
           out(chunk);
         },
@@ -367,6 +374,9 @@ export async function runQualityTask(
           : stepLine("✓", "Observer", `${run.observer.findings.length} finding(s)`),
       );
     }
+  } else if (options.observerTarget !== undefined && isTerminal(run)) {
+    out("\n-- observer --\n");
+    out(stepLine("•", "Observer", "skipped — run failed before meaningful execution"));
   }
 
   await flush(task, run);
@@ -378,7 +388,7 @@ export async function runQualityTask(
   }
   out(`Workflow:  ${options.workflow}\n`);
   out(`Run:       ${run.id}\n`);
-  out(`Invokes:   ${(run.invocations ?? []).length}\n`);
+  out(`Invocations: ${(run.invocations ?? []).length}\n`);
   out(`Branch:    ${run.branch ?? "-"}\n`);
   out(`Worktree:  ${run.workspacePath ?? "-"}\n`);
   if (run.result?.summary !== undefined) {

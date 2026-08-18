@@ -119,7 +119,11 @@ export class RunModel {
     this.phase = "agent";
 
     this.#completeStep("workspace", this.branch);
-    this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
+    if (this.workflow === "quality") {
+      this.#startStep({ id: "driver", label: "Driver" });
+    } else {
+      this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
+    }
     this.#emit();
   }
 

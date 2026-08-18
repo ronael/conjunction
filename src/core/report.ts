@@ -27,6 +27,9 @@ export interface RunReport {
   observer?: {
     structured: boolean;
     findings: number;
+    info: number;
+    warning: number;
+    major: number;
     error?: string;
   };
   acceptanceCoverage: {
@@ -176,6 +179,9 @@ export function buildRunReport(input: {
           observer: {
             structured: input.run.observer.structured,
             findings: input.run.observer.findings.length,
+            info: input.run.observer.findings.filter((f) => f.severity === "info").length,
+            warning: input.run.observer.findings.filter((f) => f.severity === "warning").length,
+            major: input.run.observer.findings.filter((f) => f.severity === "major").length,
             ...(input.run.observer.error !== undefined ? { error: input.run.observer.error } : {}),
           },
         }
@@ -202,8 +208,6 @@ export function formatRunReport(report: RunReport): string {
     "Usage",
     `coverage           ${report.metrics.usage.coverage} (${report.metrics.usage.knownInvocations}/${report.metrics.usage.totalInvocations} invocations)`,
     `estimated cost known ${formatUsd(report.metrics.usage.estimatedCostUsd)}`,
-    `tokens in          ${formatNullable(report.metrics.usage.inputTokens)}`,
-    `tokens out         ${formatNullable(report.metrics.usage.outputTokens)}`,
     "",
     "Invocations",
     `${report.metrics.invocationCount} total, ${report.metrics.targetSwitches} target switch(es), ${report.metrics.effortEscalations} effort escalation(s)`,
@@ -214,17 +218,29 @@ export function formatRunReport(report: RunReport): string {
     );
   }
   lines.push("", "Verification");
-  for (const record of report.verification.records) {
-    lines.push(
-      `- ${record.failureSignature} ${record.passed ? "PASS" : "FAIL"} ${formatMs(record.durationMs)}`,
-    );
+  if (report.verification.records.length === 0) {
+    lines.push("- none");
+  } else {
+    for (const record of report.verification.records) {
+      lines.push(
+        `- ${record.failureSignature} ${record.passed ? "PASS" : "FAIL"} ${formatMs(record.durationMs)}`,
+      );
+    }
   }
   if (report.review !== undefined) {
-    lines.push("", "Review", `${report.review.findings} finding(s)`);
+    lines.push("", "Review", reviewLine(report.review));
   }
   if (report.observer !== undefined) {
-    lines.push("", "Observer", `${report.observer.findings} finding(s)`);
+    lines.push("", "Observer", observerLine(report.observer));
   }
+  lines.push("", "Changes");
+  lines.push(landingLine());
+  if (report.outcome.state === "completed") {
+    lines.push("", "Next");
+    lines.push(`conjunction land ${report.runId}`);
+  }
+  lines.push("", "Details");
+  lines.push(`• ${report.acceptanceCoverage.reason}`);
   lines.push("", "Warnings");
   if (report.warnings.length === 0) {
     lines.push("- none");
@@ -232,6 +248,40 @@ export function formatRunReport(report: RunReport): string {
     lines.push(...report.warnings.map((warning) => `- ${warning}`));
   }
   return `${lines.join("\n")}\n`;
+}
+
+function reviewLine(review: NonNullable<RunReport["review"]>): string {
+  if (review.error !== undefined) {
+    return `unavailable (advisory): ${review.error}`;
+  }
+  const parts = [];
+  if (review.critical > 0) parts.push(`${review.critical} critical`);
+  if (review.major > 0) parts.push(`${review.major} major`);
+  if (review.minor > 0) parts.push(`${review.minor} minor`);
+  if (review.nit > 0) parts.push(`${review.nit} nit`);
+  const summary = parts.length > 0 ? parts.join(" · ") : "no findings";
+  const blockers = review.critical + review.major;
+  const blockerText =
+    blockers === 0 ? "no blockers" : `${blockers} blocker${blockers === 1 ? "" : "s"}`;
+  return `${blockerText} · ${summary}`;
+}
+
+function observerLine(observer: NonNullable<RunReport["observer"]>): string {
+  if (observer.error !== undefined) {
+    return `unavailable (advisory): ${observer.error}`;
+  }
+  const parts = [];
+  if (observer.major > 0) parts.push(`${observer.major} major`);
+  if (observer.warning > 0) parts.push(`${observer.warning} warning`);
+  if (observer.info > 0) parts.push(`${observer.info} info`);
+  const summary = parts.length > 0 ? parts.join(" · ") : "no findings";
+  return `${observer.findings} finding${observer.findings === 1 ? "" : "s"} · ${summary}`;
+}
+
+function landingLine(): string {
+  // The report itself does not know whether the run was landed; that lives on
+  // the persisted Run object and is shown via the CLI's summary, not here.
+  return "workspace isolated — run `conjunction land <runId>` to apply changes";
 }
 
 function invocationReport(invocation: Invocation): InvocationReport {
@@ -398,10 +448,6 @@ function formatMs(ms: number | null): string {
     return `${ms}ms`;
   }
   return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatNullable(value: number | null): string {
-  return value === null ? "unknown" : String(Number(value.toFixed(6)));
 }
 
 function formatUsd(value: number | null): string {

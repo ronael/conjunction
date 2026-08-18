@@ -1,7 +1,7 @@
 import type { ReviewFinding } from "./review.js";
 import type { DriverDecisionRecord, DriverRunConfig } from "./driver.js";
 import type { ObserverFinding } from "./observer.js";
-import type { AgentRuntimeUsage } from "./agent.js";
+import type { AgentRuntimeError, AgentRuntimeUsage } from "./agent.js";
 import type { ExecutionTarget, Invocation } from "./invocation.js";
 import type { WorkflowName } from "./workflow.js";
 
@@ -118,6 +118,7 @@ export interface AgentAttemptOutcome {
   aborted: boolean;
   summary?: string;
   usage?: AgentRuntimeUsage;
+  error?: AgentRuntimeError;
 }
 
 /** Lot 7: outcome of the independent, read-only reviewer invocation. */

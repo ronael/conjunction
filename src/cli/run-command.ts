@@ -47,10 +47,14 @@ function attemptDuration(attempt: Run["attempts"][number] | undefined): string |
 function agentStepLine(run: Run, label: string): string {
   const attempt = run.attempts.at(-1);
   if (run.state === "failed") {
-    return stepLine("✗", label, run.result?.error ?? "failed");
+    return stepLine(
+      "✗",
+      label,
+      attempt?.agentResult?.error?.message ?? run.result?.error ?? "failed",
+    );
   }
   if (run.state === "cancelled") {
-    return stepLine("■", label, "cancelled");
+    return stepLine("■", label, attempt?.agentResult?.error?.message ?? "cancelled");
   }
   return stepLine("✓", label, attemptDuration(attempt));
 }
@@ -65,7 +69,7 @@ export interface SelectedRuntimeTarget {
 
 export function selectedRuntimeTargets(
   options: RunTaskOptions,
-  includeCritic: boolean,
+  workflow: WorkflowName,
 ): SelectedRuntimeTarget[] {
   const selected: SelectedRuntimeTarget[] = [
     {
@@ -76,7 +80,18 @@ export function selectedRuntimeTargets(
         : {}),
     },
   ];
-  if (includeCritic) {
+  if (workflow === "quality") {
+    selected.unshift({
+      role: "driver",
+      target: options.driverTarget ?? options.workerTarget,
+      requiresReadOnly: true,
+      requiresStructuredOutput: true,
+      ...(options.driverReasoningEffort !== undefined
+        ? { explicitEffort: options.driverReasoningEffort }
+        : {}),
+    });
+  }
+  if (workflowIncludes(workflow, "critic")) {
     selected.push({
       role: "critic",
       target: options.criticTarget ?? options.workerTarget,
@@ -197,8 +212,7 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
   }
 
   const { out, observer } = deps;
-  const review = workflowIncludes(options.workflow, "critic");
-  const selectedTargets = selectedRuntimeTargets(options, review);
+  const selectedTargets = selectedRuntimeTargets(options, options.workflow);
 
   for (const selected of selectedTargets) {
     const adapter = deps.runtimeRegistry.get(selected.target.runtime);
@@ -307,7 +321,10 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       throwIfAborted();
       observer?.verificationStarted?.();
       // agent finished cleanly; an empty verify list passes trivially
-      await orchestrator.verifyRun(run.id, { correction: options.correct, review });
+      await orchestrator.verifyRun(run.id, {
+        correction: options.correct,
+        review: workflowIncludes(options.workflow, "critic"),
+      });
       observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
       await flush(task, run);
       if (hasVerify) {
@@ -354,7 +371,10 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
           out("\n── verification (attempt 2) ──\n");
           observer?.verificationStarted?.();
           // no correction option: the cap makes this outcome terminal
-          await orchestrator.verifyRun(run.id, { correction: false, review });
+          await orchestrator.verifyRun(run.id, {
+            correction: false,
+            review: workflowIncludes(options.workflow, "critic"),
+          });
           observer?.verificationFinished?.(run.verificationResult?.passed ?? false);
           await flush(task, run);
           out(
@@ -411,17 +431,23 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
       }
     }
 
-    if (options.observerTarget !== undefined && deps.signal?.aborted !== true && isTerminal(run)) {
+    const observerTarget = options.observerTarget;
+    const observerUseful =
+      observerTarget !== undefined &&
+      deps.signal?.aborted !== true &&
+      isTerminal(run) &&
+      runHasMeaningfulExecution(run);
+    if (observerUseful) {
       out("\n── observer ──\n");
       try {
         await orchestrator.observeRun(run.id, {
           timeoutMs: options.timeoutMinutes * 60_000,
-          target: options.observerTarget,
+          target: observerTarget,
           ...(options.observerReasoningEffort !== undefined
             ? { explicitReasoningEffort: options.observerReasoningEffort }
             : {}),
           ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-          onOutput: (chunk, stream) => {
+          onOutput: (chunk: string, stream: "stdout" | "stderr") => {
             observer?.agentOutput?.(chunk, stream);
             out(chunk);
           },
@@ -448,6 +474,9 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
             : stepLine("✓", "Observer", `${run.observer.findings.length} finding(s)`),
         );
       }
+    } else if (options.observerTarget !== undefined && isTerminal(run)) {
+      out("\n── observer ──\n");
+      out(stepLine("•", "Observer", "skipped — run failed before meaningful execution"));
     }
   } catch (error) {
     const message = (error as Error).message;
@@ -546,4 +575,17 @@ export async function runTask(options: RunTaskOptions, deps: RunTaskDeps): Promi
 
 function isTerminal(run: Run): boolean {
   return run.state === "completed" || run.state === "failed" || run.state === "cancelled";
+}
+
+/**
+ * True when the run produced facts an Observer can meaningfully interpret.
+ * Skipping Observer for pure infrastructure failures (e.g. Driver 529 before
+ * any worker ran) avoids extra cost/time repeating the same provider outage.
+ */
+export function runHasMeaningfulExecution(run: Run): boolean {
+  const workerCompleted = (run.invocations ?? []).some(
+    (invocation) => invocation.role === "worker" && invocation.state === "completed",
+  );
+  const verificationRan = (run.verificationHistory ?? []).length > 0;
+  return workerCompleted || verificationRan;
 }

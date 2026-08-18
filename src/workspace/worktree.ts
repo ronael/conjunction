@@ -1,10 +1,11 @@
 import path from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 
 import { execGit } from "./git.js";
 
 export const BRANCH_PREFIX = "conjunction/";
 export const WORKTREE_ROOT_RELATIVE = path.join(".conjunction", "worktrees");
+export const EXCLUDE_ENTRY = ".conjunction/";
 
 /** A path argument that could escape the expected worktree root. */
 export class UnsafePathError extends Error {
@@ -76,6 +77,29 @@ export function worktreePathForRun(repoRoot: string, runId: string): string {
 }
 
 /**
+ * Ensures `.conjunction/` is excluded from git status via `.git/info/exclude`,
+ * never by touching the user's `.gitignore`. Idempotent: safe to call many
+ * times; never duplicates the entry and never removes existing rules.
+ */
+export async function ensureConjunctionExcluded(repoRoot: string): Promise<void> {
+  const gitInfoDir = path.join(repoRoot, ".git", "info");
+  await mkdir(gitInfoDir, { recursive: true });
+  const excludePath = path.join(gitInfoDir, "exclude");
+  let content = "";
+  try {
+    content = await readFile(excludePath, "utf8");
+  } catch {
+    // file does not exist yet
+  }
+  const lines = content.split("\n");
+  if (lines.some((line) => line.trim() === EXCLUDE_ENTRY)) {
+    return;
+  }
+  const suffix = content.length === 0 || content.endsWith("\n") ? "" : "\n";
+  await writeFile(excludePath, `${content}${suffix}${EXCLUDE_ENTRY}\n`, "utf8");
+}
+
+/**
  * Creates branch `conjunction/<runId>` at HEAD and checks it out in a new
  * worktree at `<repoRoot>/.conjunction/worktrees/<runId>`.
  * Never touches the user's current branch or working tree.
@@ -83,6 +107,7 @@ export function worktreePathForRun(repoRoot: string, runId: string): string {
 export async function createRunWorkspace(repoRoot: string, runId: string): Promise<RunWorkspace> {
   const branch = branchNameForRun(runId);
   const worktreePath = worktreePathForRun(repoRoot, runId);
+  await ensureConjunctionExcluded(repoRoot);
   await execGit(["worktree", "add", "-b", branch, worktreePath, "HEAD"], { cwd: repoRoot });
   return { runId, branch, path: worktreePath };
 }

@@ -149,6 +149,7 @@ async function runQuality(input: {
       },
     },
   );
+
   const run = result.run;
   expect(run).toBeDefined();
   const eventsRaw = await readFile(

@@ -12,6 +12,7 @@ export {
   assertLandPreflight,
   checkPatchApplies,
   generateLandingPatch,
+  generateLandingPatchToFile,
   LandError,
   type LandPreflightInput,
 } from "./land.js";
@@ -20,6 +21,8 @@ export {
   branchNameForRun,
   createRunWorkspace,
   DirtyWorktreeError,
+  ensureConjunctionExcluded,
+  EXCLUDE_ENTRY,
   getWorktreeDiff,
   getWorktreeStatus,
   removeRunWorkspace,

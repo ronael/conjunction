@@ -7,6 +7,7 @@ import type {
   AgentCapabilities,
   AgentRunInput,
   AgentRunResult,
+  AgentRuntimeError,
   AgentRuntimeUsage,
   ReasoningEffort,
 } from "../../core/index.js";
@@ -35,6 +36,8 @@ export interface ClaudeAdapterOptions {
   killGraceMs?: number;
   /** Version probe seam, injected by tests. Default: `<bin> --version`. */
   probeVersion?: (bin: string) => Promise<string>;
+  /** When true, forward raw stdout/stderr (including structured envelopes). */
+  debug?: boolean;
 }
 
 /**
@@ -56,6 +59,7 @@ export class ClaudeAdapter implements AgentAdapter {
   #spawner: ProcessSpawner;
   #killGraceMs: number;
   #probeVersion: (bin: string) => Promise<string>;
+  #debug: boolean;
 
   constructor(options: ClaudeAdapterOptions = {}) {
     this.#bin = options.claudeBin ?? "claude";
@@ -69,6 +73,7 @@ export class ClaudeAdapter implements AgentAdapter {
         });
         return stdout.trim();
       });
+    this.#debug = options.debug === true;
   }
 
   capabilities(): AgentCapabilities {
@@ -119,6 +124,7 @@ export class ClaudeAdapter implements AgentAdapter {
       let timedOut = false;
       let aborted = false;
       let stdout = "";
+      let stderr = "";
 
       const timeout = setTimeout(() => {
         timedOut = true;
@@ -147,6 +153,25 @@ export class ClaudeAdapter implements AgentAdapter {
         }
         if (envelope?.usage !== undefined) {
           result.usage = envelope.usage;
+        }
+        const normalizeInput: {
+          exitCode: number | null;
+          timedOut: boolean;
+          aborted: boolean;
+          stderr: string;
+          envelope?: Record<string, unknown>;
+        } = {
+          exitCode,
+          timedOut,
+          aborted,
+          stderr,
+        };
+        if (envelope?.raw !== undefined) {
+          normalizeInput.envelope = envelope.raw;
+        }
+        const normalizedError = normalizeClaudeError(normalizeInput);
+        if (normalizedError !== undefined) {
+          result.error = normalizedError;
         }
         resolve(result);
       };
@@ -187,10 +212,16 @@ export class ClaudeAdapter implements AgentAdapter {
       child.stdout.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         stdout += text;
-        input.onOutput?.(text, "stdout");
+        // Structured output is a transport envelope; printing it in normal mode
+        // floods the user with provider JSON. Forward it only in debug mode.
+        if (!structuredOutput || this.#debug) {
+          input.onOutput?.(text, "stdout");
+        }
       });
       child.stderr.on("data", (chunk: Buffer) => {
-        input.onOutput?.(chunk.toString("utf8"), "stderr");
+        const text = chunk.toString("utf8");
+        stderr += text;
+        input.onOutput?.(text, "stderr");
       });
       child.once("error", (error: Error) => {
         input.onOutput?.(`failed to spawn ${this.#bin}: ${error.message}\n`, "stderr");
@@ -315,4 +346,78 @@ function assignNumber<T extends object, K extends keyof T>(
   if (value !== undefined) {
     target[key] = value as Exclude<T[K], undefined>;
   }
+}
+
+function normalizeClaudeError(input: {
+  exitCode: number | null;
+  timedOut: boolean;
+  aborted: boolean;
+  stderr: string;
+  envelope?: Record<string, unknown>;
+}): AgentRuntimeError | undefined {
+  if (input.aborted) {
+    return { category: "cancelled", message: "Claude Code was cancelled before finishing." };
+  }
+  if (input.timedOut) {
+    return { category: "timeout", message: "Claude Code timed out." };
+  }
+  if (input.exitCode === 0) {
+    return undefined;
+  }
+  const stderr = input.stderr.toLowerCase();
+  const apiErrorStatus = numberField(input.envelope?.api_error_status);
+  const isError = input.envelope?.is_error === true;
+  const resultText = String(input.envelope?.result ?? "").toLowerCase();
+  if (
+    stderr.includes("529") ||
+    stderr.includes("overloaded") ||
+    apiErrorStatus === 529 ||
+    resultText.includes("overloaded")
+  ) {
+    return {
+      category: "provider_overloaded",
+      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+    };
+  }
+  if (
+    stderr.includes("429") ||
+    stderr.includes("rate limit") ||
+    apiErrorStatus === 429 ||
+    resultText.includes("rate limit")
+  ) {
+    return { category: "rate_limited", message: "Claude Code hit a rate limit. Try again later." };
+  }
+  if (
+    stderr.includes("401") ||
+    stderr.includes("unauthorized") ||
+    stderr.includes("not authenticated") ||
+    apiErrorStatus === 401
+  ) {
+    return {
+      category: "authentication_failed",
+      message: "Claude Code authentication failed. Check `claude login`.",
+    };
+  }
+  if (stderr.includes("permission") || stderr.includes("access denied") || apiErrorStatus === 403) {
+    return {
+      category: "permission_denied",
+      message: "Claude Code was denied permission. Check your account or organization settings.",
+    };
+  }
+  if (input.exitCode === null) {
+    return {
+      category: "runtime_unavailable",
+      message: "Claude Code could not be started or was killed before producing a result.",
+    };
+  }
+  if (isError && typeof input.envelope?.result === "string") {
+    return {
+      category: "process_failed",
+      message: `Claude Code failed: ${input.envelope.result}`,
+    };
+  }
+  return {
+    category: "process_failed",
+    message: `Claude Code exited with code ${input.exitCode}.`,
+  };
 }

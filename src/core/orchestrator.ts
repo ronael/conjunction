@@ -503,6 +503,9 @@ export class Orchestrator {
     if (result.usage !== undefined) {
       agentResult.usage = result.usage;
     }
+    if (result.error !== undefined) {
+      agentResult.error = result.error;
+    }
     if (attempt !== undefined) {
       attempt.completedAt = completedAt;
       attempt.agentResult = agentResult;
@@ -525,19 +528,25 @@ export class Orchestrator {
       invocation.state = "cancelled";
       invocation.terminationReason = "aborted";
       if (mutateRunState) {
-        this.cancelRun(run.id, "agent execution aborted");
+        this.cancelRun(run.id, result.error?.message ?? "agent execution aborted");
       }
     } else if (result.timedOut) {
       invocation.state = "failed";
       invocation.terminationReason = "timed_out";
       if (mutateRunState) {
-        this.failRun(run.id, `agent timed out after ${options.timeoutMs}ms`);
+        this.failRun(
+          run.id,
+          result.error?.message ?? `agent timed out after ${options.timeoutMs}ms`,
+        );
       }
     } else if (result.exitCode !== 0) {
       invocation.state = "failed";
       invocation.terminationReason = "process_failed";
       if (mutateRunState) {
-        this.failRun(run.id, `agent exited with code ${result.exitCode ?? "null (killed)"}`);
+        this.failRun(
+          run.id,
+          result.error?.message ?? `agent exited with code ${result.exitCode ?? "null (killed)"}`,
+        );
       }
     } else {
       invocation.state = "completed";
@@ -894,6 +903,9 @@ export class Orchestrator {
     }
     if (result.usage !== undefined) {
       agentResult.usage = result.usage;
+    }
+    if (result.error !== undefined) {
+      agentResult.error = result.error;
     }
     invocation.completedAt = this.#timestamp();
     invocation.outcome = agentResult;

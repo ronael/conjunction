@@ -69,6 +69,23 @@ export interface AgentRunInput {
   outputSchema?: unknown;
 }
 
+export type AgentRuntimeErrorCategory =
+  | "provider_overloaded"
+  | "rate_limited"
+  | "authentication_failed"
+  | "permission_denied"
+  | "runtime_unavailable"
+  | "timeout"
+  | "cancelled"
+  | "process_failed"
+  | "unknown";
+
+export interface AgentRuntimeError {
+  category: AgentRuntimeErrorCategory;
+  /** Human-facing sentence, provider-agnostic. */
+  message: string;
+}
+
 export interface AgentRunResult {
   /** null when the process was killed or could not be started. */
   exitCode: number | null;
@@ -79,6 +96,8 @@ export interface AgentRunResult {
   lastMessage?: string;
   /** Optional structured runtime usage. Unknown means the runtime did not expose it reliably. */
   usage?: AgentRuntimeUsage;
+  /** Normalized runtime failure, when the adapter can identify the cause. */
+  error?: AgentRuntimeError;
 }
 
 /**

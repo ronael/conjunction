@@ -20,7 +20,7 @@ export async function runWithTui(
   deps: { runtimeRegistry: RuntimeRegistry },
 ): Promise<number> {
   // Preflight in plain text: a TUI makes no sense when setup cannot succeed.
-  for (const selected of selectedRuntimeTargets(options, options.workflow === "review")) {
+  for (const selected of selectedRuntimeTargets(options, options.workflow)) {
     const adapter = deps.runtimeRegistry.get(selected.target.runtime);
     if (!adapter) {
       process.stdout.write(`error: unknown agent runtime "${selected.target.runtime}"\n`);

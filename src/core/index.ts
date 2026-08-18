@@ -34,6 +34,8 @@ export {
   type AgentCapabilities,
   type AgentRunInput,
   type AgentRunResult,
+  type AgentRuntimeError,
+  type AgentRuntimeErrorCategory,
   type AgentRuntimeUsage,
   type AgentTokenUsage,
   StaticRuntimeRegistry,

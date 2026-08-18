@@ -235,6 +235,81 @@ describe("ClaudeAdapter.run invocation", () => {
     const result = await adapter.run({ ...baseInput, outputSchema: schema });
     expect(result.lastMessage).toBe(JSON.stringify(envelope));
   });
+
+  it("suppresses structured stdout in normal mode so users never see provider JSON", async () => {
+    const schema = { type: "object", properties: { summary: { type: "string" } } };
+    const structured = { summary: "review ok", findings: [] };
+    const envelope = { type: "result", structured_output: structured };
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(JSON.stringify(envelope));
+      child.exit(0);
+    });
+    const outputs: { chunk: string; stream: "stdout" | "stderr" }[] = [];
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    await adapter.run({
+      ...baseInput,
+      outputSchema: schema,
+      onOutput: (chunk, stream) => outputs.push({ chunk, stream }),
+    });
+    expect(outputs).toHaveLength(0);
+  });
+
+  it("forwards structured stdout in debug mode", async () => {
+    const schema = { type: "object", properties: { summary: { type: "string" } } };
+    const envelope = JSON.stringify({ type: "result", structured_output: { summary: "ok" } });
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(envelope);
+      child.exit(0);
+    });
+    const outputs: string[] = [];
+    const adapter = makeAdapter({ spawner: fake.spawner, debug: true });
+    await adapter.run({
+      ...baseInput,
+      outputSchema: schema,
+      onOutput: (chunk) => outputs.push(chunk),
+    });
+    expect(outputs.join("")).toBe(envelope);
+  });
+
+  it("normalizes a 529 Overloaded error", async () => {
+    const fake = fakeSpawn((child) => {
+      child.stderr.write("Error: 529 Overloaded");
+      child.exit(1);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run(baseInput);
+    expect(result.error).toEqual({
+      category: "provider_overloaded",
+      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+    });
+  });
+
+  it("normalizes a 529 returned inside Claude's structured JSON envelope", async () => {
+    const fake = fakeSpawn((child) => {
+      child.stdout.write(
+        JSON.stringify({
+          is_error: true,
+          api_error_status: 529,
+          result: "API Error: Repeated 529 Overloaded errors. The API is at capacity.",
+        }),
+      );
+      child.exit(1);
+    });
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, outputSchema: { type: "object" } });
+    expect(result.error).toEqual({
+      category: "provider_overloaded",
+      message: "Claude Code returned 529 Overloaded. No workspace changes were made.",
+    });
+  });
+
+  it("normalizes a timeout", async () => {
+    const fake = fakeSpawn((child) => child.exit(null));
+    const adapter = makeAdapter({ spawner: fake.spawner });
+    const result = await adapter.run({ ...baseInput, timeoutMs: 1 });
+    // the fake immediately exits with null; the adapter interprets that as killed
+    expect(result.error?.category).toBe("runtime_unavailable");
+  });
 });
 
 describe("ClaudeAdapter.detect", () => {

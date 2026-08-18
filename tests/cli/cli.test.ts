@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -12,7 +12,7 @@ import {
 } from "../../src/core/index.js";
 import { cli } from "../../src/cli/cli.js";
 import { inlineBrief } from "../../src/cli/brief.js";
-import { runTask } from "../../src/cli/run-command.js";
+import { runTask, selectedRuntimeTargets } from "../../src/cli/run-command.js";
 import { execGit } from "../../src/workspace/index.js";
 
 const tempDirs: string[] = [];
@@ -203,7 +203,7 @@ describe("cli run (stub adapter, real git repo)", () => {
     expect(humanIo.text()).toContain("readOnly=false workspaceWrite=true");
     expect(humanIo.text()).toContain("coverage           unknown");
     expect(humanIo.text()).toContain("estimated cost known unknown");
-    expect(humanIo.text()).toContain("tokens in          unknown");
+    expect(humanIo.text()).toContain("conjunction land");
   });
 
   it("fails (exit 1) when verification fails, run state recorded as failed", async () => {
@@ -971,6 +971,43 @@ describe("cli land", () => {
     expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
   });
 
+  it("failed land is non-destructive: run, events, and worktree survive for retry", async () => {
+    const repo = await makeTempRepo();
+    const runId = await completedRun(repo);
+    const runPath = path.join(repo, ".conjunction", "runs", `${runId}.json`);
+    const eventsPath = path.join(repo, ".conjunction", "runs", `${runId}.events.jsonl`);
+    const beforeRun = JSON.parse(await readFile(runPath, "utf8")) as {
+      run: { landed?: unknown };
+    };
+    expect(beforeRun.run.landed).toBeUndefined();
+
+    // dirty the main tree so preflight refuses (a failure before any apply)
+    await writeFile(path.join(repo, "README.md"), "user dirty edit\n");
+
+    const io1 = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io1.out })).toBe(1);
+    expect(io1.text()).toContain("uncommitted changes");
+
+    // run JSON still exists and is untouched
+    const afterRun = JSON.parse(await readFile(runPath, "utf8")) as {
+      run: { landed?: unknown; state: string };
+    };
+    expect(afterRun.run.state).toBe("completed");
+    expect(afterRun.run.landed).toBeUndefined();
+
+    // events still exist
+    expect(await readFile(eventsPath, "utf8")).toContain("run.completed");
+
+    // worktree still exists
+    await expect(stat(path.join(repo, ".conjunction", "worktrees", runId))).resolves.toBeDefined();
+
+    // clean the tree and retry successfully
+    await execGit(["checkout", "--", "README.md"], { cwd: repo });
+    const io2 = capture();
+    expect(await cli(["land", runId, "--repo", repo], { out: io2.out })).toBe(0);
+    expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("hello conjunction\n");
+  });
+
   it("warns on reviewer error but proceeds (review is advisory)", async () => {
     const repo = await makeTempRepo();
     const crashingReviewerStub = stubAdapter(async (input) => {
@@ -1211,6 +1248,33 @@ describe("cli run — workflows", () => {
     expect(io.text()).toContain("Workflow:  single");
   });
 
+  it("skips observer when the run failed before meaningful execution", async () => {
+    const repo = await makeTempRepo();
+    const failingStub = stubAdapter(() => Promise.resolve({ exitCode: 1 }));
+    const observerStub = stubAdapter(() => Promise.resolve({ exitCode: 0, lastMessage: "{}" }));
+    const registry = new StaticRuntimeRegistry([
+      { ...failingStub, id: "worker-runtime" },
+      { ...observerStub, id: "observer-runtime" },
+    ]);
+    const io = capture();
+    const code = await cli(
+      [
+        "run",
+        "create hello.txt",
+        "--repo",
+        repo,
+        "--plain",
+        "--runtime",
+        "worker-runtime",
+        "--observer-runtime",
+        "observer-runtime",
+      ],
+      { runtimeRegistry: registry, out: io.out },
+    );
+    expect(code).toBe(1);
+    expect(io.text()).toContain("skipped — run failed before meaningful execution");
+  });
+
   it("--workflow review runs the independent critic", async () => {
     const repo = await makeTempRepo();
     const io = capture();
@@ -1243,6 +1307,25 @@ describe("cli run — workflows", () => {
       await readFile(path.join(repo, ".conjunction", "runs", `${runId}.json`), "utf8"),
     ) as { run: { workflow?: string } };
     expect(stored.run.workflow).toBe("review");
+  });
+
+  it("selects driver target for quality workflow preflight", () => {
+    const options = {
+      brief: inlineBrief("test"),
+      workflow: "quality" as const,
+      workerTarget: { runtime: "codex-cli" },
+      driverTarget: { runtime: "claude-code" },
+      criticTarget: { runtime: "claude-code" },
+      observerTarget: { runtime: "claude-code" },
+      repoPath: "/tmp/repo",
+      verifyCommands: [],
+      timeoutMinutes: 5,
+      cleanup: false,
+      correct: false,
+    };
+    const targets = selectedRuntimeTargets(options, options.workflow);
+    expect(targets.map((t) => t.role)).toEqual(["driver", "worker", "critic", "observer"]);
+    expect(targets[0]?.target).toEqual({ runtime: "claude-code" });
   });
 
   it("an unknown workflow is a usage error listing the available ones", async () => {

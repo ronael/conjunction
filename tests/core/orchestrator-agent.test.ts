@@ -504,6 +504,25 @@ describe("Orchestrator invocation lifecycle", () => {
     expect(orchestrator.events.ofType("invocation.cancelled")).toHaveLength(1);
   });
 
+  it("skips observer when the run failed before any worker or verification", async () => {
+    const { adapter } = stubAgent(() => {}, { exitCode: 1 });
+    const orchestrator = new Orchestrator({
+      createId,
+      now,
+      workspace: stubWorkspace,
+      runtimeRegistry: new StaticRuntimeRegistry([adapter]),
+    });
+    const { run } = await runningRun(orchestrator);
+    await orchestrator.executeRun(run.id, { timeoutMs: 1_000 });
+    expect(run.state).toBe("failed");
+    expect(run.invocations?.some((invocation) => invocation.role === "worker")).toBe(true);
+    // observer should still run because a worker invocation exists, even if it failed
+    run.state = "completed";
+    run.completedAt = "2026-01-01T00:00:05.000Z";
+    await orchestrator.observeRun(run.id, { timeoutMs: 1_000, target: { runtime: "stub-agent" } });
+    expect(run.observer).toBeDefined();
+  });
+
   it("emits invocation.cancelled when an observer is aborted", async () => {
     const inputs: AgentRunInput[] = [];
     const adapter: AgentAdapter = {

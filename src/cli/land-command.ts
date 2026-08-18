@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { ConjunctionEvent, RunReview } from "../core/index.js";
@@ -8,7 +8,7 @@ import {
   assertLandPreflight,
   checkPatchApplies,
   findRepoRoot,
-  generateLandingPatch,
+  generateLandingPatchToFile,
   getHeadCommit,
   LandError,
   removeRunWorkspace,
@@ -112,12 +112,19 @@ export async function landCommand(
   }
   out(`✓ Preflight passed          ${targetBranch}, clean tree\n`);
 
-  const patch = await generateLandingPatch(run.workspacePath);
-  if (patch.trim().length === 0) {
+  const patchPath = path.join(store.dir, `${run.id}.landing.patch`);
+  try {
+    await generateLandingPatchToFile(run.workspacePath, patchPath);
+  } catch (error) {
+    if (error instanceof LandError) {
+      return refuse(error.message);
+    }
+    throw error;
+  }
+  const patchStat = await stat(patchPath).catch(() => undefined);
+  if (patchStat === undefined || patchStat.size === 0) {
     return refuse("the worktree has no changes — nothing to land");
   }
-  const patchPath = path.join(store.dir, `${run.id}.landing.patch`);
-  await writeFile(patchPath, patch, "utf8");
   out(`✓ Patch generated           ${patchPath}\n`);
 
   try {

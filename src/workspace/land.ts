@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { stat } from "node:fs/promises";
 
 import { execGit, getCurrentBranch, type GitError } from "./git.js";
@@ -85,7 +87,69 @@ export async function assertLandPreflight(input: LandPreflightInput): Promise<vo
  * (intent-to-add, so UNTRACKED files — what agents mostly produce — appear
  * in the diff) followed by `git diff --binary HEAD` (binary content
  * included). Covers new/binary/renamed/deleted files in git-native format.
- * Returns the patch text; "" means the worktree has no changes.
+ * Streams stdout directly to `patchPath` so large diffs never become huge
+ * in-memory strings; stderr is captured with a bounded buffer.
+ */
+export async function generateLandingPatchToFile(
+  worktreePath: string,
+  patchPath: string,
+): Promise<void> {
+  await execGit(["add", "-N", "."], { cwd: worktreePath });
+  await streamGitDiff(worktreePath, patchPath);
+}
+
+const MAX_STDERR_BYTES = 64 * 1024;
+
+function streamGitDiff(worktreePath: string, patchPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["diff", "--binary", "HEAD"], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const out = createWriteStream(patchPath, { encoding: "utf8" });
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
+
+    child.stdout.pipe(out);
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= MAX_STDERR_BYTES) {
+        stderrChunks.push(chunk);
+      }
+    });
+
+    child.on("error", (error: Error) => {
+      out.destroy();
+      reject(new LandError(`git diff --binary HEAD failed to start: ${error.message}`));
+    });
+
+    out.on("error", (error: Error) => {
+      child.kill();
+      reject(new LandError(`failed to write patch file: ${error.message}`));
+    });
+
+    child.once("close", (exitCode: number | null) => {
+      out.end(() => {
+        if (exitCode === 0) {
+          resolve();
+          return;
+        }
+        const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+        reject(
+          new LandError(
+            `git diff --binary HEAD failed in ${worktreePath} (exit ${exitCode ?? "null"}):\n${stderr || "no output"}`,
+          ),
+        );
+      });
+    });
+  });
+}
+
+/**
+ * Legacy in-memory variant. Prefer `generateLandingPatchToFile` for production
+ * code because large diffs can exceed Node's exec buffer. Kept for tests that
+ * only need the patch text.
  */
 export async function generateLandingPatch(worktreePath: string): Promise<string> {
   await execGit(["add", "-N", "."], { cwd: worktreePath });

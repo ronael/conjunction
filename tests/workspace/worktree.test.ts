@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -8,6 +8,7 @@ import {
   branchNameForRun,
   createRunWorkspace,
   DirtyWorktreeError,
+  ensureConjunctionExcluded,
   execGit,
   findRepoRoot,
   getWorktreeDiff,
@@ -76,6 +77,35 @@ describe("path/branch derivation", () => {
 });
 
 describe("createRunWorkspace", () => {
+  it("excludes .conjunction from git status via .git/info/exclude", async () => {
+    const repo = await makeTempRepo();
+    await ensureConjunctionExcluded(repo);
+
+    const excludePath = path.join(repo, ".git", "info", "exclude");
+    const exclude = await readFile(excludePath, "utf8");
+    expect(exclude).toContain(".conjunction/");
+
+    // .conjunction content must not appear in git status
+    await mkdir(path.join(repo, ".conjunction", "runs"), { recursive: true });
+    await writeFile(path.join(repo, ".conjunction", "runs", "x.json"), "{}");
+    const status = await getWorktreeStatus(repo);
+    expect(status.clean).toBe(true);
+  });
+
+  it("is idempotent and preserves existing exclude rules", async () => {
+    const repo = await makeTempRepo();
+    const excludePath = path.join(repo, ".git", "info", "exclude");
+    await writeFile(excludePath, "node_modules/\n*.log\n", "utf8");
+
+    await ensureConjunctionExcluded(repo);
+    await ensureConjunctionExcluded(repo);
+
+    const exclude = await readFile(excludePath, "utf8");
+    expect(exclude).toContain("node_modules/");
+    expect(exclude).toContain("*.log");
+    expect(exclude.match(/\.conjunction\//g)).toHaveLength(1);
+  });
+
   it("creates branch conjunction/<runId> and a worktree containing HEAD", async () => {
     const repo = await makeTempRepo();
     const workspace = await createRunWorkspace(repo, "run-1");

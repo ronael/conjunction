@@ -11,6 +11,7 @@ import {
   createRunWorkspace,
   execGit,
   generateLandingPatch,
+  generateLandingPatchToFile,
   getWorktreeStatus,
   LandError,
 } from "../../src/workspace/index.js";
@@ -65,6 +66,22 @@ describe("generateLandingPatch", () => {
     const repo = await makeTempRepo();
     const workspace = await createRunWorkspace(repo, "run-2");
     expect((await generateLandingPatch(workspace.path)).trim()).toBe("");
+  });
+
+  it("streams a large patch directly to a file without buffering it in memory", async () => {
+    const repo = await makeTempRepo();
+    const workspace = await createRunWorkspace(repo, "run-big");
+    // ~20 MiB of new text, enough to exceed the old 16 MiB exec buffer
+    const big = "x".repeat(20 * 1024 * 1024);
+    await writeFile(path.join(workspace.path, "big.txt"), big);
+    const patchPath = path.join(repo, ".conjunction", "big.landing.patch");
+
+    await generateLandingPatchToFile(workspace.path, patchPath);
+
+    const patch = await readFile(patchPath, "utf8");
+    expect(patch.length).toBeGreaterThan(20 * 1024 * 1024);
+    expect(patch).toContain("diff --git a/big.txt b/big.txt");
+    expect(patch).toContain(`+${big.slice(0, 100)}`);
   });
 });
 

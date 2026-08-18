@@ -123,7 +123,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
             "critic-effort",
             "observer-effort",
           ],
-          flags: ["cleanup", "help", "plain", "no-correct", "review"],
+          flags: ["cleanup", "help", "plain", "no-correct", "review", "debug"],
         });
         if (parsed.flags.has("help")) {
           out(USAGE);
@@ -142,7 +142,8 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
           process.cwd(),
         );
         const timeoutMinutes = parseTimeout(parsed.options.timeout?.at(-1));
-        const runtimeRegistry = resolveRuntimeRegistry(deps);
+        const debug = parsed.flags.has("debug");
+        const runtimeRegistry = resolveRuntimeRegistry(deps, debug);
         const defaultRuntime = deps.adapter?.id ?? DEFAULT_RUNTIME;
         const verifyCommands = (parsed.options.verify ?? []).map(parseVerifyCommand);
         const workerTarget = buildTarget(
@@ -200,10 +201,7 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         // The TUI only takes over a real terminal the user is watching; tests
         // (injected `out`), pipes and CI get the plain output, as does --plain.
         const useTui =
-          workflow !== "quality" &&
-          !parsed.flags.has("plain") &&
-          deps.out === undefined &&
-          process.stdout.isTTY === true;
+          !parsed.flags.has("plain") && deps.out === undefined && process.stdout.isTTY === true;
         if (useTui) {
           const { runWithTui } = await import("./ui/tui.js");
           return await runWithTui(runOptions, { runtimeRegistry });
@@ -321,14 +319,14 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
   }
 }
 
-function resolveRuntimeRegistry(deps: CliDeps): RuntimeRegistry {
+function resolveRuntimeRegistry(deps: CliDeps, debug = false): RuntimeRegistry {
   if (deps.runtimeRegistry !== undefined) {
     return deps.runtimeRegistry;
   }
   if (deps.adapter !== undefined) {
     return new StaticRuntimeRegistry([deps.adapter]);
   }
-  return new StaticRuntimeRegistry([new CodexAdapter(), new ClaudeAdapter()]);
+  return new StaticRuntimeRegistry([new CodexAdapter({}), new ClaudeAdapter({ debug })]);
 }
 
 function buildTarget(runtime: string, model: string | undefined): ExecutionTarget {

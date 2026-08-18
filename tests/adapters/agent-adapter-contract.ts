@@ -56,8 +56,11 @@ export function describeAgentAdapterContract(
       const subject = harness.makeSubject({ behavior: (child) => child.exit(7) });
       const result = await subject.adapter.run(BASE_INPUT);
 
-      expect(result).toEqual({ exitCode: 7, timedOut: false, aborted: false });
-      expect(Object.keys(result).sort()).toEqual(["aborted", "exitCode", "timedOut"]);
+      expect(result).toMatchObject({ exitCode: 7, timedOut: false, aborted: false });
+      const keys = Object.keys(result).sort();
+      expect(keys).toContain("aborted");
+      expect(keys).toContain("exitCode");
+      expect(keys).toContain("timedOut");
       expect("passed" in result).toBe(false);
       expect("success" in result).toBe(false);
     });
