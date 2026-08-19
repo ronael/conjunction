@@ -1,5 +1,6 @@
 import { CodexAdapter } from "../adapters/codex/index.js";
 import { ClaudeAdapter } from "../adapters/claude/index.js";
+import { OpenCodeAdapter } from "../adapters/opencode/index.js";
 import type {
   AgentAdapter,
   ExecutionTarget,
@@ -328,7 +329,11 @@ function resolveRuntimeRegistry(deps: CliDeps, debug = false): RuntimeRegistry {
   if (deps.adapter !== undefined) {
     return new StaticRuntimeRegistry([deps.adapter]);
   }
-  return new StaticRuntimeRegistry([new CodexAdapter({}), new ClaudeAdapter({ debug })]);
+  return new StaticRuntimeRegistry([
+    new CodexAdapter({}),
+    new ClaudeAdapter({ debug }),
+    new OpenCodeAdapter({}),
+  ]);
 }
 
 function buildTarget(runtime: string, model: string | undefined): ExecutionTarget {
