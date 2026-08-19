@@ -29,6 +29,7 @@ export {
   type WorkflowName,
 } from "./workflow.js";
 export {
+  type AgentActivity,
   type AgentAdapter,
   type AgentAvailability,
   type AgentCapabilities,

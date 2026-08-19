@@ -191,7 +191,7 @@ describe("RunModel checklist steps", () => {
       ["workspace", "done"],
       ["agent-1", "active"],
     ]);
-    expect(model.steps[0]?.detail).toBe("conjunction/a1b2c3d4");
+    expect(model.steps[0]?.detail).toBe("isolated · conjunction/a1b2c3d4");
   });
 
   it("verification lifecycle: agent step done, verify step failed with detail", () => {
@@ -474,6 +474,41 @@ describe("RunModel quality workflow steps", () => {
     } as never);
     model.workerFinished("cancelled");
     expect(model.steps.find((s) => s.id === "worker-2")?.status).toBe("cancelled");
+  });
+
+  it("agentActivity attaches live activity to the single active step", () => {
+    const model = modelWithContext("quality");
+    model.driverStarted();
+    model.agentActivity({ kind: "thinking", label: "Analysing the task" });
+    expect(model.steps.find((s) => s.id === "driver-1")?.activity).toBe("Analysing the task");
+
+    model.driverDecision({
+      action: "delegate",
+      targetId: "worker",
+      objective: "implement",
+      reason: "go",
+    } as never);
+    model.agentActivity({ kind: "editing", label: "Editing", detail: "ui-test.txt" });
+    const workerStep = model.steps.find((s) => s.id === "worker-1");
+    expect(workerStep?.activity).toBe("Editing ui-test.txt");
+    expect(model.steps.filter((s) => s.status === "active")).toHaveLength(1);
+  });
+
+  it("driverDecisionRefused marks the Driver step refused with the reason", () => {
+    const model = modelWithContext("quality");
+    model.driverStarted();
+    const decision = {
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "accept",
+      reason: "green",
+    } as never;
+    model.driverDecision(decision);
+    model.driverDecisionRefused(decision as never, "verification is missing");
+    const step = model.steps.find((s) => s.id === "driver-1");
+    expect(step?.status).toBe("failed");
+    expect(step?.decision?.refused).toBe("verification is missing");
   });
 
   it("integration: reproduces the real quality callback sequence without duplicate or ghost steps", () => {

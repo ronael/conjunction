@@ -73,6 +73,28 @@ export interface DriverDecisionEvent
     >,
     RunScoped {}
 
+export interface DriverDecisionRefusedEvent
+  extends
+    EventBase<
+      "driver.decision.refused",
+      { decisionId: string; invocationId: string; action: string; refusalReason: string }
+    >,
+    RunScoped {}
+
+/** Structured, user-facing live activity (never chain-of-thought or envelopes). */
+export interface AgentActivityEvent
+  extends
+    EventBase<
+      "agent.activity",
+      {
+        invocationId: string;
+        kind: "thinking" | "reading" | "searching" | "command" | "editing" | "tool" | "waiting";
+        label: string;
+        detail?: string;
+      }
+    >,
+    RunScoped {}
+
 export interface VerificationStartedEvent
   extends EventBase<"verification.started", Record<string, never>>, RunScoped {}
 
@@ -133,8 +155,10 @@ export type ConjunctionEvent =
   | InvocationCancelledEvent
   | AgentStartedEvent
   | AgentOutputEvent
+  | AgentActivityEvent
   | AgentCompletedEvent
   | DriverDecisionEvent
+  | DriverDecisionRefusedEvent
   | VerificationStartedEvent
   | VerificationFailedEvent
   | VerificationPassedEvent

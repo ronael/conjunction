@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type {
+  AgentActivity,
   DriverProgressFacts,
   DriverTargetOption,
   ExecutionTarget,
@@ -160,6 +161,7 @@ export async function runQualityTask(
           observer?.agentOutput?.(chunk, stream);
           out(chunk);
         },
+        onActivity: (activity) => observer?.agentActivity?.(activity),
       });
       await flush(task, run);
       if (run.state !== "running") {
@@ -196,8 +198,13 @@ export async function runQualityTask(
       if (decision.action === "accept") {
         const refusal = acceptRefusalReason(run);
         if (refusal !== undefined) {
-          orchestrator.failRun(run.id, `driver accept refused: ${refusal}`);
-          break;
+          // Recoverable invariant violation: record the refusal as a durable
+          // run fact, tell the UI, and re-invoke the Driver so it can see why
+          // its previous decision was rejected and pick verify/delegate/stop.
+          orchestrator.refuseDriverDecision(run.id, decision.id, refusal);
+          observer?.driverDecisionRefused?.(decision, refusal);
+          out(stepLine("✗", `Driver #${run.driverDecisions?.length} refused`, refusal));
+          continue;
         }
         run.quality.acceptedDecisionId = decision.id;
         run.result = { summary: `driver accepted: ${decision.reason}` };
@@ -239,6 +246,7 @@ export async function runQualityTask(
               observer?.agentOutput?.(chunk, stream);
               out(chunk);
             },
+            onActivity: (activity) => observer?.agentActivity?.(activity),
           });
           await flush(task, run);
           if (run.review !== undefined) {
@@ -363,6 +371,7 @@ export async function runQualityTask(
           observer?.agentOutput?.(chunk, stream);
           out(chunk);
         },
+        onActivity: (activity: AgentActivity) => observer?.agentActivity?.(activity),
       });
     } catch (error) {
       run.observer = {

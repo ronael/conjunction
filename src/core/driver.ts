@@ -19,6 +19,13 @@ export interface DriverDecisionRecord extends DriverDecision {
   readonly id: string;
   readonly invocationId: string;
   readonly createdAt: string;
+  /**
+   * Set when the decision was rejected for a recoverable invariant violation
+   * (e.g. `accept` while verification is missing/red/stale). The Driver is
+   * re-invoked with this fact instead of the run being failed outright.
+   */
+  outcome?: "refused";
+  refusalReason?: string;
 }
 
 export interface WorkerTargetPermissions {
@@ -156,6 +163,21 @@ export function parseDriverDecision(raw: string): DriverDecisionParseResult {
   return { ok: true, decision };
 }
 
+/**
+ * The last Driver decision that was refused for a recoverable invariant
+ * violation, so the next Driver invocation knows exactly why its predecessor
+ * was rejected instead of having to guess.
+ */
+export function lastRefusedDecision(run: Run): DriverDecisionRecord | undefined {
+  const decisions = run.driverDecisions ?? [];
+  for (let index = decisions.length - 1; index >= 0; index--) {
+    if (decisions[index]?.outcome === "refused") {
+      return decisions[index];
+    }
+  }
+  return undefined;
+}
+
 export function buildDriverPacket(input: {
   task: Task;
   run: Run;
@@ -165,11 +187,21 @@ export function buildDriverPacket(input: {
   limits: DriverLimits;
   progress: DriverProgressFacts;
 }): string {
+  const refused = lastRefusedDecision(input.run);
   const facts = {
     brief: {
       title: input.task.title,
       source: input.task.source,
     },
+    previousDecision:
+      refused === undefined
+        ? null
+        : {
+            action: refused.action,
+            outcome: refused.outcome,
+            reason: refused.reason,
+            refusalReason: refused.refusalReason,
+          },
     allowedWorkerTargets: input.allowedWorkerTargets.map((entry) => ({
       id: entry.id,
       target: entry.target,

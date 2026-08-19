@@ -42,6 +42,16 @@ export interface AgentCapabilities {
   reasoningEffort: readonly ReasoningEffort[];
 }
 
+/** Structured, user-facing activity signal emitted by an adapter while running. */
+export interface AgentActivity {
+  /** Activity category; stable across runtimes. */
+  kind: "thinking" | "reading" | "searching" | "command" | "editing" | "tool" | "waiting";
+  /** Short, human-readable label (one line). */
+  label: string;
+  /** Optional detail; must be bounded and never contain provider envelopes. */
+  detail?: string;
+}
+
 export interface AgentRunInput {
   /** Target selected for this specific invocation. */
   target: ExecutionTarget;
@@ -56,6 +66,11 @@ export interface AgentRunInput {
   signal?: AbortSignal;
   /** Streaming output; the orchestrator turns chunks into agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /**
+   * Live activity updates for the TUI. The adapter emits only observable,
+   * user-meaningful actions; never chain-of-thought or raw provider events.
+   */
+  onActivity?: (activity: AgentActivity) => void;
   /**
    * Lot 7 reviewer mode: the runtime MUST run read-only (codex maps this to
    * `-s read-only`). There is no way to request a less restrictive sandbox.

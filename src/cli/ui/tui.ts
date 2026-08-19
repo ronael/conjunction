@@ -88,6 +88,8 @@ export async function runWithTui(
       agentOutput: (chunk, stream) => model.appendOutput(chunk, stream),
       driverStarted: () => model.driverStarted(),
       driverDecision: (decision) => model.driverDecision(decision),
+      driverDecisionRefused: (decision, reason) => model.driverDecisionRefused(decision, reason),
+      agentActivity: (activity) => model.agentActivity(activity),
       workerFinished: (outcome) => model.workerFinished(outcome),
       driverAccepted: () => model.driverAccepted(),
       finalVerificationStarted: () => model.finalVerificationStarted(),

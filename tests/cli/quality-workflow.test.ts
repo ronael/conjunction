@@ -496,13 +496,15 @@ describe("quality workflow", () => {
     expect(scenario.run.state).toBe("completed");
   });
 
-  it("stale verification: green verify before a later write cannot be accepted", async () => {
+  it("stale verification: accept refused is recoverable — the Driver re-runs and can verify then accept", async () => {
     const scenario = await runQuality({
       decisions: [
         { action: "delegate", targetId: "worker", objective: "write v1", reason: "first write" },
         { action: "verify", reason: "green v1" },
         { action: "delegate", targetId: "worker", objective: "write v2", reason: "second write" },
         { action: "accept", reason: "try to accept stale result" },
+        { action: "verify", reason: "re-verify after the refusal" },
+        { action: "accept", reason: "now fresh and green" },
       ],
       workers: {
         worker: async (input, callIndex) => {
@@ -511,29 +513,71 @@ describe("quality workflow", () => {
       },
     });
 
-    expect(scenario.run.state).toBe("failed");
-    expect(scenario.run.result?.error).toBe("driver accept refused: verification is stale");
+    // The run recovers instead of failing outright.
+    expect(scenario.run.state).toBe("completed");
+    expect(scenario.run.driverDecisions?.map((d) => d.action)).toEqual([
+      "delegate",
+      "verify",
+      "delegate",
+      "accept",
+      "verify",
+      "accept",
+    ]);
+
+    // The refused accept is a durable fact on the decision record.
+    const refused = scenario.run.driverDecisions?.find((d) => d.outcome === "refused");
+    expect(refused?.action).toBe("accept");
+    expect(refused?.refusalReason).toBe("verification is stale");
+
+    // The next Driver packet explicitly receives the refusal instead of guessing.
+    const reVerifyPacket = scenario.driverInputs[4]?.instructions ?? "";
+    expect(reVerifyPacket).toContain('"previousDecision"');
+    expect(reVerifyPacket).toContain('"verification is stale"');
   });
 
-  it("red and missing verification are refused mechanically", async () => {
-    const red = await runQuality({
+  it("red and missing verification are refused as durable facts but stay recoverable", async () => {
+    const scenario = await runQuality({
       decisions: [
-        { action: "delegate", targetId: "worker", objective: "do nothing", reason: "bad worker" },
-        { action: "verify", reason: "expect red" },
+        { action: "accept", reason: "try missing accept" },
+        { action: "verify", reason: "after the refusal, verify" },
         { action: "accept", reason: "try red accept" },
+        { action: "stop", reason: "enough facts for the test" },
       ],
       workers: { worker: async () => {} },
     });
-    expect(red.run.state).toBe("failed");
-    expect(red.run.result?.error).toBe("driver accept refused: verification is red");
-    expect(red.run.verificationHistory?.[0]?.failureSignature).toBe("test -f done.txt:1");
 
-    const missing = await runQuality({
-      decisions: [{ action: "accept", reason: "try missing accept" }],
+    expect(scenario.run.state).toBe("failed");
+    expect(scenario.run.result?.error).toBe("driver stopped: enough facts for the test");
+
+    const refusals = scenario.run.driverDecisions?.filter((d) => d.outcome === "refused") ?? [];
+    expect(refusals.map((d) => d.refusalReason)).toEqual([
+      "verification is missing",
+      "verification is red",
+    ]);
+    // The next packet after each refusal carries the explicit refusal fact.
+    expect(scenario.driverInputs[1]?.instructions ?? "").toContain('"verification is missing"');
+    expect(scenario.driverInputs[3]?.instructions ?? "").toContain('"verification is red"');
+    // And it is persisted as a run event.
+    expect(
+      scenario.events.some(
+        (event) =>
+          event.type === "driver.decision.refused" &&
+          event.payload.refusalReason === "verification is red",
+      ),
+    ).toBe(true);
+  });
+
+  it("a Driver that keeps accepting after refusal is still capped by the decision limit", async () => {
+    const scenario = await runQuality({
+      decisions: [
+        { action: "accept", reason: "insist without verification" },
+        { action: "accept", reason: "insist again" },
+      ],
       workers: { worker: async () => {} },
+      qualityLimits: { maxDriverDecisions: 1 },
     });
-    expect(missing.run.state).toBe("failed");
-    expect(missing.run.result?.error).toBe("driver accept refused: verification is missing");
+    expect(scenario.run.state).toBe("failed");
+    expect(scenario.run.result?.error).toBe("driver decision limit reached (1)");
   });
 
   it("counts repeated verification failure signatures only when consecutive", async () => {

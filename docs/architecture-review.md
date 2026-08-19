@@ -378,6 +378,21 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
   Driver workers. Writable worker invocations may carry `workspaceChange`, a
   deterministic before/after diff fingerprint comparison used to expose
   `lastWorkerChangedWorkspace` to the next Driver invocation.
+- **Recoverable refusal:** an `accept` refused for a recoverable invariant
+  (verification missing/red/stale) is no longer a terminal failure. It is
+  recorded on the decision record (`outcome: "refused"`, `refusalReason`),
+  emitted as `driver.decision.refused`, and the Driver is re-invoked. The next
+  `buildDriverPacket` exposes `previousDecision` (action/outcome/refusalReason)
+  so the model sees exactly why its predecessor was rejected — it can then
+  `verify`/`delegate`/`stop`. `maxDriverDecisions` still caps the loop, so a
+  Driver that keeps insisting cannot spin forever.
+- **Live activity (TUI feedback):** the `AgentAdapter` port gained an optional
+  `onActivity` callback in `AgentRunInput`, fed by a minimal `AgentActivity`
+  type (`kind`, `label`, `detail`). Core stays provider-agnostic and records
+  activity as `agent.activity` events; only the composition layer forwards it to
+  the TUI. The OpenCode adapter subscribes to its official event stream
+  (`session.next.*`, `session.idle`, …) and maps a curated subset to activity —
+  never chain-of-thought, reasoning deltas, or provider envelopes.
 - **Final critic:** after Driver accept, `quality` runs one final deterministic
   verification through the existing terminal path and then the independent
   read-only critic. The critic target can differ from both Driver and workers.

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type {
+  AgentActivity,
   AgentAdapter,
   AgentAvailability,
   AgentCapabilities,
@@ -214,6 +215,239 @@ function extractLastMessage(response: PromptResponse, expectJson: boolean): stri
   return candidate;
 }
 
+/** Validate a JSON Schema's top-level object shape without a schema dependency. */
+function validateJsonAgainstSchema(
+  parsed: unknown,
+  schema: Record<string, unknown> | undefined,
+): string | undefined {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return "expected a JSON object";
+  }
+  if (schema === undefined) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const required = schema.required;
+  if (Array.isArray(required)) {
+    for (const key of required) {
+      if (typeof key === "string" && !(key in record)) {
+        return `missing required field: ${key}`;
+      }
+    }
+  }
+  const properties = schema.properties;
+  if (properties !== null && typeof properties === "object" && !Array.isArray(properties)) {
+    for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+      if (!(key in record)) {
+        continue;
+      }
+      const property = value as { type?: string };
+      if (typeof property.type !== "string") {
+        continue;
+      }
+      if (property.type === "string" && typeof record[key] !== "string") {
+        return `field "${key}" must be a string`;
+      }
+      if (property.type === "object" && (typeof record[key] !== "object" || record[key] === null)) {
+        return `field "${key}" must be an object`;
+      }
+      if (property.type === "array" && !Array.isArray(record[key])) {
+        return `field "${key}" must be an array`;
+      }
+      if (property.type === "number" && typeof record[key] !== "number") {
+        return `field "${key}" must be a number`;
+      }
+      if (property.type === "boolean" && typeof record[key] !== "boolean") {
+        return `field "${key}" must be a boolean`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Guarantee the "structured output" contract: when a schema was requested the
+ * adapter must not hand arbitrary text back as if it were valid JSON. Returns
+ * `{ lastMessage }` on success, or a normalized failure result.
+ */
+function normalizeStructuredOutput(
+  candidate: string,
+  schema: Record<string, unknown> | undefined,
+): { ok: true; lastMessage: string } | { ok: false; result: AgentRunResult } {
+  if (candidate.trim().length === 0) {
+    return {
+      ok: false,
+      result: {
+        exitCode: 1,
+        timedOut: false,
+        aborted: false,
+        error: { category: "process_failed", message: "agent returned empty structured output" },
+      },
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        exitCode: 1,
+        timedOut: false,
+        aborted: false,
+        error: {
+          category: "process_failed",
+          message: `agent returned invalid JSON: ${(error as Error).message}`,
+        },
+      },
+    };
+  }
+  const validationError = validateJsonAgainstSchema(parsed, schema);
+  if (validationError !== undefined) {
+    return {
+      ok: false,
+      result: {
+        exitCode: 1,
+        timedOut: false,
+        aborted: false,
+        error: {
+          category: "process_failed",
+          message: `agent structured output invalid: ${validationError}`,
+        },
+      },
+    };
+  }
+  return { ok: true, lastMessage: candidate };
+}
+
+// ── live activity: map a subset of the OpenCode event stream to AgentActivity ──
+
+const TOOL_ACTIVITY: Record<string, AgentActivity["kind"]> = {
+  read: "reading",
+  grep: "searching",
+  glob: "searching",
+  list: "searching",
+  find: "searching",
+  search: "searching",
+  bash: "command",
+  exec: "command",
+  shell: "command",
+  edit: "editing",
+  write: "editing",
+  apply_patch: "editing",
+  patch: "editing",
+};
+
+function toolActivityName(tool: string): string {
+  const base = tool.replace(/^open_code_/, "");
+  return TOOL_ACTIVITY[base] ?? "tool";
+}
+
+function toolLabel(tool: string): string {
+  const base = tool.replace(/^open_code_/, "");
+  const friendly: Record<string, string> = {
+    read: "Reading",
+    grep: "Searching",
+    glob: "Searching",
+    list: "Listing",
+    find: "Searching",
+    search: "Searching",
+    bash: "Running command",
+    exec: "Running command",
+    shell: "Running command",
+    edit: "Editing",
+    write: "Writing",
+    apply_patch: "Editing",
+    patch: "Editing",
+    todo: "Tracking todo",
+    lsp: "Querying LSP",
+    web_search: "Searching web",
+    web_fetch: "Fetching URL",
+  };
+  return friendly[base] ?? `Using ${base}`;
+}
+
+/**
+ * Subscribe to the global OpenCode event stream and translate only the events
+ * that describe observable, user-meaningful work into {@link AgentActivity}.
+ * Chain-of-thought, reasoning deltas and raw payloads are never forwarded.
+ *
+ * Returns a stop function. Best-effort: any subscription failure is swallowed
+ * (activity is advisory, never affects the run outcome).
+ */
+function subscribeActivities(
+  client: OpencodeClient,
+  onActivity: (activity: AgentActivity) => void,
+): () => void {
+  let stopped = false;
+  let iterator: AsyncIterator<never> | undefined;
+  const stop = (): void => {
+    stopped = true;
+    iterator?.return?.(undefined).catch(() => {});
+  };
+
+  // The v2 surface exposes the native event stream; fall back to v1 when absent.
+  const eventApi = (client as unknown as { v2?: { event?: { subscribe?: unknown } } }).v2?.event;
+  const v1Event = (client as unknown as { event?: { subscribe?: unknown } }).event;
+  const subscribeFn = eventApi?.subscribe ?? v1Event?.subscribe;
+
+  if (typeof subscribeFn !== "function") {
+    return stop;
+  }
+  const subscribe = subscribeFn as () => Promise<{ stream: AsyncGenerator<never> }>;
+
+  void (async () => {
+    try {
+      const subscription = await subscribe();
+      iterator = subscription.stream[Symbol.asyncIterator]();
+      for await (const event of subscription.stream) {
+        if (stopped) {
+          break;
+        }
+        const activity = mapEventToActivity(event as { type?: string; properties?: unknown });
+        if (activity !== undefined) {
+          onActivity(activity);
+        }
+      }
+    } catch {
+      // activity is advisory; ignore subscription errors
+    }
+  })();
+
+  return stop;
+}
+
+function mapEventToActivity(event: {
+  type?: string;
+  properties?: unknown;
+}): AgentActivity | undefined {
+  const type = event.type;
+  const properties = (event.properties ?? {}) as Record<string, unknown>;
+  const sessionID = typeof properties.sessionID === "string" ? properties.sessionID : "";
+  switch (type) {
+    case "session.next.step.started":
+    case "session.next.text.started":
+      return { kind: "thinking", label: "Analysing the task", detail: sessionID };
+    case "session.next.tool.called":
+    case "session.next.tool.progress":
+    case "session.next.tool.input.started": {
+      const tool = typeof properties.tool === "string" ? properties.tool : "tool";
+      const input = (properties.input ?? {}) as Record<string, unknown>;
+      const file =
+        typeof input.file_path === "string"
+          ? input.file_path
+          : typeof input.path === "string"
+            ? input.path
+            : undefined;
+      const detail = file ?? (typeof input.command === "string" ? input.command : undefined);
+      const kind = toolActivityName(tool) as AgentActivity["kind"];
+      return { kind, label: toolLabel(tool), ...(detail ? { detail } : {}) };
+    }
+    default:
+      return undefined;
+  }
+}
+
 /**
  * AgentAdapter for OpenCode via the official @opencode-ai/sdk.
  *
@@ -268,23 +502,46 @@ export class OpenCodeAdapter implements AgentAdapter {
       );
     }
 
+    // Real timeout enforcement: `createOpencode({ timeout })` only bounds the
+    // server, not necessarily the blocking prompt. We own an AbortController
+    // that fires after input.timeoutMs and also on the caller's signal, and
+    // hand it to every request so a suspended prompt is actually cancelled.
+    const local = new AbortController();
+    let timedOut = false;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      local.abort();
+    }, input.timeoutMs);
+    const onUserAbort = (): void => local.abort();
+    if (input.signal?.aborted === true) {
+      local.abort();
+    } else if (input.signal !== undefined) {
+      input.signal.addEventListener("abort", onUserAbort, { once: true });
+    }
+
     let server: OpenCodeServer | undefined;
+    let stopActivity: (() => void) | undefined;
     try {
       const factory = this.#createOpencode === undefined ? createOpencode : this.#createOpencode;
-      const serverOptions: ServerOptions = { timeout: input.timeoutMs };
-      if (input.signal !== undefined) {
-        serverOptions.signal = input.signal;
-      }
+      const serverOptions: ServerOptions = { timeout: input.timeoutMs, signal: local.signal };
       const created = await factory(serverOptions);
       server = created.server;
       const { client } = created;
 
-      const sessionResult = await client.session.create({
-        directory: input.workspacePath,
-        title: "conjunction-run",
-        model: { id: model.modelID, providerID: model.providerID },
-        permission: permissionRules(input.readOnly === true),
-      });
+      stopActivity =
+        input.onActivity !== undefined
+          ? subscribeActivities(client, (activity) => input.onActivity?.(activity))
+          : undefined;
+
+      const sessionResult = await client.session.create(
+        {
+          directory: input.workspacePath,
+          title: "conjunction-run",
+          model: { id: model.modelID, providerID: model.providerID },
+          permission: permissionRules(input.readOnly === true),
+        },
+        { signal: local.signal },
+      );
       if (sessionResult.error !== undefined) {
         return {
           exitCode: 1,
@@ -308,7 +565,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         outputSchema,
       });
 
-      const firstResult = await client.session.prompt(firstPrompt);
+      const firstResult = await client.session.prompt(firstPrompt, { signal: local.signal });
       const firstResponse = firstResult.data as PromptResponse | undefined;
       const firstErrorMessage =
         firstResult.error !== undefined
@@ -332,7 +589,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           ),
           readOnly: input.readOnly === true,
         });
-        const retryResult = await client.session.prompt(retryPrompt);
+        const retryResult = await client.session.prompt(retryPrompt, { signal: local.signal });
         if (retryResult.error !== undefined) {
           return {
             exitCode: 1,
@@ -354,17 +611,39 @@ export class OpenCodeAdapter implements AgentAdapter {
         response = firstResponse as PromptResponse;
       }
 
-      const lastMessage = extractLastMessage(response, expectJson);
+      const rawMessage = extractLastMessage(response, expectJson);
+
+      if (expectJson) {
+        const normalized = normalizeStructuredOutput(rawMessage, outputSchema);
+        if (!normalized.ok) {
+          return normalized.result;
+        }
+        return {
+          exitCode: 0,
+          timedOut: false,
+          aborted: false,
+          ...(normalized.lastMessage.length > 0 ? { lastMessage: normalized.lastMessage } : {}),
+        };
+      }
+
       const result: AgentRunResult = {
         exitCode: 0,
         timedOut: false,
         aborted: false,
-        ...(lastMessage.length > 0 ? { lastMessage } : {}),
+        ...(rawMessage.length > 0 ? { lastMessage: rawMessage } : {}),
       };
       return result;
     } catch (error) {
       if (input.signal?.aborted === true) {
         return { exitCode: 1, timedOut: false, aborted: true };
+      }
+      if (timedOut) {
+        return {
+          exitCode: 1,
+          timedOut: true,
+          aborted: false,
+          error: { category: "timeout", message: `agent timed out after ${input.timeoutMs}ms` },
+        };
       }
       return {
         exitCode: 1,
@@ -373,6 +652,11 @@ export class OpenCodeAdapter implements AgentAdapter {
         error: normalizeOpenCodeError(error),
       };
     } finally {
+      clearTimeout(timeoutHandle);
+      if (input.signal !== undefined) {
+        input.signal.removeEventListener("abort", onUserAbort);
+      }
+      stopActivity?.();
       server?.close();
     }
   }

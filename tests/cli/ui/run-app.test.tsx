@@ -76,7 +76,7 @@ async function flush(): Promise<void> {
 }
 
 describe("RunApp", () => {
-  it("renders the info box, checklist and streaming output while running", async () => {
+  it("renders the header, task, checklist and compact streaming output while running", async () => {
     const model = runningModel();
     model.appendOutput("thinking…\nwriting hello.txt\n", "stdout");
     model.appendOutput("a warning\n", "stderr");
@@ -86,21 +86,14 @@ describe("RunApp", () => {
     await flush();
 
     const frame = lastFrame() ?? "";
-    // rounded info box with dim-key/bright-value rows
-    expect(frame).toContain("╭");
-    expect(frame).toContain("╰");
-    expect(frame).toContain("Task");
+    // header + task at top, workspace line compact
+    expect(frame).toContain("Conjunction");
     expect(frame).toContain("add a dark-mode toggle");
-    expect(frame).toContain("Branch");
-    expect(frame).toContain("conjunction/a1b2c3d4");
-    expect(frame).toContain("Worktree");
-    expect(frame).toContain("/tmp/repo/.conjunction/worktrees/a1b2c3d4");
-    expect(frame).toContain("Verify");
-    expect(frame).toContain("typecheck");
+    expect(frame).toContain("workspace · isolated · conjunction/a1b2c3d4");
     // checklist: workspace done, agent active
     expect(frame).toContain("✓ Workspace ready");
     expect(frame).toContain("Agent (attempt 1)");
-    // toned-down output pane label + streamed content
+    // compact output pane label + streamed content
     expect(frame).toContain("── agent output");
     expect(frame).toContain("thinking…");
     expect(frame).toContain("writing hello.txt");
@@ -108,6 +101,17 @@ describe("RunApp", () => {
     // footer
     expect(frame).toContain("elapsed 00:");
     expect(frame).toContain("q / Ctrl-C: cancel");
+    unmount();
+  });
+
+  it("does not reserve an empty output viewport when there is no agent output", async () => {
+    const model = runningModel();
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("agent output");
     unmount();
   });
 
@@ -374,5 +378,208 @@ describe("RunApp", () => {
     expect(frame).not.toContain("finding 5"); // capped at 5
     expect(frame).toContain("+2 more in the run JSON");
     unmount();
+  });
+
+  function qualityModel(): RunModel {
+    const model = new RunModel();
+    model.verifyItems = [{ name: "grep", status: "pending" }];
+    model.setContext({
+      run: {
+        id: "a1b2c3d4-full-run-id",
+        taskId: "task-1",
+        runtime: "opencode",
+        target: { runtime: "opencode", model: "opencode/deepseek-v4-flash-free" },
+        workflow: "quality",
+        createdAt: "t0",
+        state: "running",
+        attempts: [],
+        branch: "conjunction/a1b2c3d4",
+        workspacePath: "/tmp/repo/.conjunction/worktrees/a1b2c3d4",
+      },
+      task: makeTask(),
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+    });
+    return model;
+  }
+
+  it("renders a Driver delegate decision with reason and bounded objective", async () => {
+    const model = qualityModel();
+    model.driverStarted();
+    model.driverDecision({
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "delegate",
+      targetId: "worker",
+      objective: "Implement the requested file.",
+      reason: "The requested file does not exist yet.",
+    } as never);
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Driver #1 · opencode / deepseek-v4-flash-free");
+    expect(frame).toContain("→ Delegate · worker");
+    expect(frame).toContain("The requested file does not exist yet.");
+    expect(frame).toContain("Implement the requested file.");
+    unmount();
+  });
+
+  it("renders Driver verify and accept decisions, and a refused accept", async () => {
+    const model = qualityModel();
+    model.driverStarted();
+    model.driverDecision({
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "verify",
+      reason: "The implementation is ready for deterministic verification.",
+    } as never);
+    {
+      const { lastFrame, unmount } = render(
+        <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+      );
+      await flush();
+      expect(lastFrame() ?? "").toContain("→ Verify");
+      unmount();
+    }
+    model.driverStarted();
+    const accept = {
+      id: "d2",
+      invocationId: "i2",
+      createdAt: "t",
+      action: "accept",
+      reason: "green",
+    } as never;
+    model.driverDecision(accept);
+    model.driverDecisionRefused(accept as never, "verification is missing");
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("→ Accept");
+    expect(frame).toContain("✗ Refused · verification is missing");
+    unmount();
+  });
+
+  it("shows live Worker activity under the active step", async () => {
+    const model = qualityModel();
+    model.driverStarted();
+    model.driverDecision({
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "delegate",
+      targetId: "worker",
+      objective: "create the file",
+      reason: "go",
+    } as never);
+    model.agentActivity({ kind: "editing", label: "Editing", detail: "ui-test.txt" });
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Editing ui-test.txt");
+    expect(frame).toContain("Worker #1 · opencode / deepseek-v4-flash-free");
+    unmount();
+  });
+
+  it("keeps exactly one active step (one spinner) and clears it on completion", async () => {
+    const model = qualityModel();
+    model.driverStarted();
+    const { lastFrame: f1, unmount: u1 } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+    );
+    await flush();
+    const activeSteps = (f1() ?? "").split("\n").filter((l) => /^[◐◓◑◒] /.test(l));
+    expect(activeSteps).toHaveLength(1);
+    u1();
+
+    model.driverDecision({
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "stop",
+      reason: "nope",
+    } as never);
+    model.finish({
+      exitCode: 1,
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+      run: { ...makeRun("failed"), driverDecisions: [] } as never,
+      task: makeTask(),
+    } as never);
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+    );
+    await flush();
+    expect(lastFrame() ?? "").not.toMatch(/^[◐◓◑◒] /m);
+    unmount();
+  });
+
+  it("clears the spinner on failed and cancelled final states", async () => {
+    for (const state of ["failed", "cancelled"] as const) {
+      const model = new RunModel();
+      model.setContext({
+        run: { ...makeRun("running"), workflow: "single" } as never,
+        task: makeTask(),
+        repoRoot: "/tmp/repo",
+        storeDir: "/tmp/repo/.conjunction/runs",
+      });
+      model.finish(finalResult(state));
+      const { lastFrame, unmount } = render(
+        <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+      );
+      await flush();
+      const frame = lastFrame() ?? "";
+      expect(frame).not.toMatch(/^[◐◓◑◒] /m);
+      if (state === "failed") {
+        expect(frame).toContain("✗ FAILED");
+      } else {
+        expect(frame).toContain("■ CANCELLED");
+      }
+      unmount();
+    }
+  });
+
+  it("wraps long paths and reasons without exploding the layout at narrow widths", async () => {
+    const model = new RunModel();
+    model.verifyItems = [];
+    model.setContext({
+      run: {
+        id: "a1b2c3d4-full-run-id",
+        taskId: "task-1",
+        runtime: "opencode",
+        workflow: "single",
+        createdAt: "t0",
+        state: "running",
+        attempts: [],
+        branch: "conjunction/a1b2c3d4",
+        workspacePath:
+          "/Users/someone/a/really/deep/and/long/workspace/path/.conjunction/worktrees/a1b2c3d4",
+      },
+      task: makeTask(),
+      repoRoot: "/tmp/repo",
+      storeDir: "/tmp/repo/.conjunction/runs",
+    });
+    model.appendOutput("some\noutput\nlines\nhere\n", "stdout");
+    for (const w of [80, 60, 40]) {
+      const { lastFrame, unmount } = render(
+        <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={w} />,
+      );
+      await flush();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("add a dark-mode toggle");
+      expect(frame).toContain("some");
+      // no single unbreakable line exceeds the width (long path wraps)
+      for (const line of frame.split("\n")) {
+        expect(line.length).toBeLessThanOrEqual(w + 2);
+      }
+      unmount();
+    }
   });
 });

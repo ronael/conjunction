@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type {
+  AgentActivity,
   ExecutionTarget,
   DriverDecisionRecord,
   DriverLimits,
@@ -168,10 +169,22 @@ export interface RunObserver {
   /** Once, right after the workspace exists. */
   context?(ctx: { run: Run; task: Task; repoRoot: string; storeDir: string }): void;
   agentOutput?(chunk: string, stream: "stdout" | "stderr"): void;
-  /** Quality workflow: the read-only Driver invocation is starting. */
+  /**
+   * Quality workflow: the read-only Driver invocation is starting.
+   */
   driverStarted?(): void;
   /** Quality workflow: the Driver produced a parsed decision. */
   driverDecision?(decision: DriverDecisionRecord): void;
+  /**
+   * Quality workflow: a Driver decision was refused for a recoverable invariant
+   * violation and the Driver will be re-invoked with that fact.
+   */
+  driverDecisionRefused?(decision: DriverDecisionRecord, refusalReason: string): void;
+  /**
+   * Live, user-facing agent activity (reading/editing/searching/running a
+   * command). Never chain-of-thought or provider envelopes.
+   */
+  agentActivity?(activity: AgentActivity): void;
   /** Quality workflow: the current Worker invocation finished. */
   workerFinished?(outcome: "completed" | "failed" | "cancelled"): void;
   /** Quality workflow: the Driver accepted the implementation. */

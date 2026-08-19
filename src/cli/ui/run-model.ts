@@ -23,6 +23,16 @@ export interface VerifyItem {
 
 export type StepStatus = "pending" | "active" | "done" | "failed" | "cancelled";
 
+/** A Driver decision rendered under its Driver step. */
+export interface StepDecision {
+  action: string;
+  reason: string;
+  objective?: string;
+  target?: string;
+  /** Set when the decision was refused for a recoverable invariant violation. */
+  refused?: string;
+}
+
 /** One row of the Daytona-style phase checklist. */
 export interface ChecklistStep {
   id: string;
@@ -30,6 +40,12 @@ export interface ChecklistStep {
   status: StepStatus;
   /** Right-aligned dim detail: branch, duration, "typecheck failed", … */
   detail?: string;
+  /** When the step began (for a live elapsed counter on the active step). */
+  startedAt?: number;
+  /** Driver decision shown beneath the Driver step. */
+  decision?: StepDecision;
+  /** Latest live activity shown while the step is active. */
+  activity?: string;
 }
 
 /** Ring-buffer cap so a long run cannot grow memory without bound. */
@@ -55,6 +71,12 @@ export class RunModel {
   readonly startedAt = Date.now();
   finalState: RunState | "setup-error" | undefined;
   final: RunTaskResult | undefined;
+
+  /** Friendly runtime/model label, e.g. "OpenCode / DeepSeek V4 Flash". */
+  runtimeLabel = "";
+
+  /** Branch abbreviated to its short id, e.g. "conjunction/6b882b8e". */
+  shortBranch = "";
 
   /** Daytona-style phase checklist, filled in as the run progresses. */
   steps: ChecklistStep[] = [{ id: "workspace", label: "Workspace ready", status: "active" }];
@@ -122,9 +144,14 @@ export class RunModel {
     this.storeDir = ctx.storeDir;
     this.briefPath = ctx.task.source?.kind === "file" ? ctx.task.source.path : "";
     this.workflow = ctx.run.workflow ?? "";
+    this.runtimeLabel = runtimeLabel(
+      ctx.run.target?.runtime ?? ctx.run.runtime,
+      ctx.run.target?.model,
+    );
+    this.shortBranch = shortBranch(ctx.run.branch ?? "");
     this.phase = "agent";
 
-    this.#completeStep("workspace", this.branch);
+    this.#completeStep("workspace", `isolated · ${this.shortBranch}`);
     if (this.workflow !== "quality") {
       this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
     }
@@ -252,6 +279,7 @@ export class RunModel {
     if (driverStep === undefined) {
       return;
     }
+    this.#setDecision(driverStep, decision);
     switch (decision.action) {
       case "delegate": {
         this.#completeStep(driverStep);
@@ -276,6 +304,33 @@ export class RunModel {
         break;
       }
     }
+    this.#emit();
+  }
+
+  /** Quality workflow: a Driver decision was refused and the Driver re-invoked. */
+  driverDecisionRefused(decision: DriverDecisionRecord, refusalReason: string): void {
+    // The decision was already recorded; find the most recent Driver step and
+    // mark it refused so the re-evaluation is visible.
+    const step = [...this.steps].reverse().find((candidate) => candidate.id.startsWith("driver-"));
+    if (step !== undefined) {
+      step.status = "failed";
+      step.decision = {
+        action: decision.action,
+        reason: decision.reason,
+        refused: refusalReason,
+      };
+    }
+    this.#emit();
+  }
+
+  /** Quality workflow: live agent activity for the currently active step. */
+  agentActivity(activity: { kind: string; label: string; detail?: string }): void {
+    const step = this.steps.find((candidate) => candidate.status === "active");
+    if (step === undefined) {
+      return;
+    }
+    const detail = activity.detail !== undefined ? ` ${activity.detail}` : "";
+    step.activity = `${activity.label}${detail}`;
     this.#emit();
   }
 
@@ -394,8 +449,21 @@ export class RunModel {
   }
 
   #startStep(step: { id: string; label: string }): void {
-    this.steps.push({ ...step, status: "active" });
+    this.steps.push({ ...step, status: "active", startedAt: Date.now() });
     this.#stepStartedAt.set(step.id, Date.now());
+  }
+
+  #setDecision(id: string, decision: DriverDecisionRecord): void {
+    const step = this.steps.find((candidate) => candidate.id === id);
+    if (step === undefined) {
+      return;
+    }
+    step.decision = {
+      action: decision.action,
+      reason: decision.reason,
+      ...(decision.objective !== undefined ? { objective: decision.objective } : {}),
+      ...(decision.targetId !== undefined ? { target: decision.targetId } : {}),
+    };
   }
 
   #startQualityDriver(): void {
@@ -444,4 +512,25 @@ export class RunModel {
     step.status = "cancelled";
     step.detail = "cancelled";
   }
+}
+
+/** "OpenCode / DeepSeek V4 Flash" from a target; graceful when model is absent. */
+function runtimeLabel(runtime: string, model: string | undefined): string {
+  if (model === undefined || model === "") {
+    return runtime;
+  }
+  const slash = model.lastIndexOf("/");
+  const short = slash >= 0 ? model.slice(slash + 1) : model;
+  return `${runtime} / ${short}`;
+}
+
+/** "conjunction/6b882b8e" from a full branch id. */
+function shortBranch(branch: string): string {
+  const slash = branch.lastIndexOf("/");
+  if (slash < 0) {
+    return branch.length > 0 ? branch.slice(0, 8) : branch;
+  }
+  const prefix = branch.slice(0, slash + 1);
+  const short = branch.slice(slash + 1, slash + 1 + 8);
+  return `${prefix}${short}`;
 }

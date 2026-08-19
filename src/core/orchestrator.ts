@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { AgentAdapter, AgentRunInput, AgentRunResult, RuntimeRegistry } from "./agent.js";
+import type {
+  AgentAdapter,
+  AgentActivity,
+  AgentRunInput,
+  AgentRunResult,
+  RuntimeRegistry,
+} from "./agent.js";
 import type { DriverDecision, DriverDecisionRecord } from "./driver.js";
 import { verificationFailureSignature } from "./driver.js";
 import { EventStore, type ConjunctionEvent } from "./events.js";
@@ -108,6 +114,12 @@ export interface ExecuteRunOptions {
   signal?: AbortSignal;
   /** Forwarded agent output, after it has been recorded as agent.output events. */
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /**
+   * Forwarded live activity, after it has been recorded as agent.activity
+   * events. Only observable, user-meaningful activity — never provider
+   * envelopes or chain-of-thought.
+   */
+  onActivity?: (activity: AgentActivity) => void;
 }
 
 interface InvokeAgentBaseOptions extends ExecuteRunOptions {
@@ -362,6 +374,9 @@ export class Orchestrator {
     if (options.onOutput !== undefined) {
       invokeOptions.onOutput = options.onOutput;
     }
+    if (options.onActivity !== undefined) {
+      invokeOptions.onActivity = options.onActivity;
+    }
     const legacyOptions: {
       recordAttempt: boolean;
       updateRunResult: boolean;
@@ -478,6 +493,20 @@ export class Orchestrator {
           payload: { invocationId: invocation.id, stream, chunk },
         });
         options.onOutput?.(chunk, stream);
+      },
+      onActivity: (activity) => {
+        this.#emit({
+          type: "agent.activity",
+          taskId: run.taskId,
+          runId: run.id,
+          payload: {
+            invocationId: invocation.id,
+            kind: activity.kind,
+            label: activity.label,
+            ...(activity.detail !== undefined ? { detail: activity.detail } : {}),
+          },
+        });
+        options.onActivity?.(activity);
       },
     };
     if (options.signal !== undefined) {
@@ -668,6 +697,34 @@ export class Orchestrator {
       },
     });
     return record;
+  }
+
+  /**
+   * Marks a recorded Driver decision as refused for a recoverable invariant
+   * violation (e.g. `accept` while verification is missing/red/stale). This is
+   * a durable fact of the run, persisted on the decision record and emitted as
+   * a `driver.decision.refused` event so the next Driver invocation can see it.
+   */
+  refuseDriverDecision(runId: string, decisionId: string, reason: string): DriverDecisionRecord {
+    const run = this.#requireRun(runId);
+    const decision = (run.driverDecisions ?? []).find((candidate) => candidate.id === decisionId);
+    if (decision === undefined) {
+      throw new RunNotExecutableError(`unknown driver decision: ${decisionId}`);
+    }
+    decision.outcome = "refused";
+    decision.refusalReason = reason;
+    this.#emit({
+      type: "driver.decision.refused",
+      taskId: run.taskId,
+      runId: run.id,
+      payload: {
+        decisionId: decision.id,
+        invocationId: decision.invocationId,
+        action: decision.action,
+        refusalReason: reason,
+      },
+    });
+    return decision;
   }
 
   /**
@@ -891,6 +948,22 @@ export class Orchestrator {
     if (options.signal !== undefined) {
       input.signal = options.signal;
     }
+    if (options.onActivity !== undefined) {
+      input.onActivity = (activity) => {
+        this.#emit({
+          type: "agent.activity",
+          taskId: run.taskId,
+          runId: run.id,
+          payload: {
+            invocationId: invocation.id,
+            kind: activity.kind,
+            label: activity.label,
+            ...(activity.detail !== undefined ? { detail: activity.detail } : {}),
+          },
+        });
+        options.onActivity?.(activity);
+      };
+    }
 
     const result = await adapter.run(input);
     const agentResult: AgentAttemptOutcome = {
@@ -999,6 +1072,7 @@ export class Orchestrator {
         outputSchema: OBSERVER_OUTPUT_SCHEMA,
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
         ...(options.onOutput !== undefined ? { onOutput: options.onOutput } : {}),
+        ...(options.onActivity !== undefined ? { onActivity: options.onActivity } : {}),
       },
       {
         recordAttempt: false,

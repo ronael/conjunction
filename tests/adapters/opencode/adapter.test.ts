@@ -344,4 +344,140 @@ describe("OpenCodeAdapter", () => {
     expect(result.error?.category).toBe("provider_overloaded");
     expect(result.error?.message).toContain("529 Overloaded");
   });
+
+  it("invalid JSON in the text fallback yields a normalized failure, not a fake 'valid JSON'", async () => {
+    const schema = {
+      type: "object",
+      required: ["summary"],
+      properties: { summary: { type: "string" } },
+    };
+    let promptCount = 0;
+    const fake = fakeCreateOpencode({
+      onPrompt: () => {
+        promptCount++;
+        if (promptCount === 1) {
+          return {
+            info: {
+              error: { name: "APIError", data: { message: "structured output unsupported" } },
+            },
+            parts: [],
+          };
+        }
+        return { info: {}, parts: [{ type: "text", text: "not json at all" }] };
+      },
+    });
+    const adapter = new OpenCodeAdapter({ createOpencode: fake.fn });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.exitCode).toBe(1);
+    expect(result.error?.category).toBe("process_failed");
+    expect(result.error?.message).toContain("invalid JSON");
+    expect(result.lastMessage).toBeUndefined();
+  });
+
+  it("valid JSON that violates the schema (missing required field) is a normalized failure", async () => {
+    const schema = {
+      type: "object",
+      required: ["summary"],
+      properties: { summary: { type: "string" } },
+    };
+    const fake = fakeCreateOpencode({
+      onPrompt: () => ({ info: {}, parts: [{ type: "text", text: '{"findings": []}' }] }),
+    });
+    const adapter = new OpenCodeAdapter({ createOpencode: fake.fn });
+    const result = await adapter.run({ ...baseInput, outputSchema: schema });
+    expect(result.exitCode).toBe(1);
+    expect(result.error?.message).toContain("missing required field: summary");
+  });
+
+  it("enforces input.timeoutMs on a suspended prompt via a local abort and closes the server", async () => {
+    const closed = { value: false };
+    const fakeClient = {
+      session: {
+        create: async () => ({ data: { id: "session-1" } }),
+        // never resolves; rejects only when the local timeout signal aborts
+        prompt: (_params: unknown, options: { signal?: AbortSignal }) =>
+          new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              "abort",
+              () => {
+                reject(new DOMException("aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          }),
+      },
+    };
+    const factory = async () => ({
+      client: fakeClient as unknown as import("@opencode-ai/sdk/v2").OpencodeClient,
+      server: {
+        url: "http://localhost:9999",
+        close: () => {
+          closed.value = true;
+        },
+      },
+    });
+    const start = Date.now();
+    const result = await new OpenCodeAdapter({ createOpencode: factory }).run({
+      ...baseInput,
+      timeoutMs: 50,
+    });
+    expect(result.timedOut).toBe(true);
+    expect(result.error?.category).toBe("timeout");
+    expect(result.error?.message).toContain("timed out after 50ms");
+    expect(Date.now() - start).toBeLessThan(5000);
+    expect(closed.value).toBe(true);
+  });
+
+  it("maps OpenCode events to user-facing AgentActivity and stops the subscription", async () => {
+    const seen: string[] = [];
+    async function* events() {
+      yield {
+        id: "1",
+        type: "session.next.step.started",
+        properties: { sessionID: "s", timestamp: 1 },
+      };
+      yield {
+        id: "2",
+        type: "session.next.tool.called",
+        properties: {
+          sessionID: "s",
+          callID: "c",
+          tool: "edit",
+          input: { file_path: "ui-test.txt" },
+        },
+      };
+      yield {
+        id: "3",
+        type: "session.next.tool.called",
+        properties: { sessionID: "s", callID: "c", tool: "bash", input: { command: "pnpm test" } },
+      };
+    }
+    const fakeClient = {
+      event: { subscribe: async () => ({ stream: events() }) },
+      session: {
+        create: async () => ({ data: { id: "session-1" } }),
+        // hold the prompt open briefly so the background event loop is consumed
+        prompt: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return { data: { info: {}, parts: [{ type: "text", text: "ok" }] } };
+        },
+      },
+    };
+    const factory = async () => ({
+      client: fakeClient as unknown as import("@opencode-ai/sdk/v2").OpencodeClient,
+      server: { url: "http://localhost:9999", close: () => {} },
+    });
+    const adapter = new OpenCodeAdapter({ createOpencode: factory });
+    await adapter.run({
+      ...baseInput,
+      onActivity: (activity) =>
+        seen.push(
+          `${activity.kind}:${activity.label}${activity.detail ? `:${activity.detail}` : ""}`,
+        ),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(seen).toContain("thinking:Analysing the task:s");
+    expect(seen).toContain("editing:Editing:ui-test.txt");
+    expect(seen).toContain("command:Running command:pnpm test");
+  });
 });
