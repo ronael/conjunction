@@ -171,8 +171,11 @@ export interface RunObserver {
   agentOutput?(chunk: string, stream: "stdout" | "stderr"): void;
   /**
    * Quality workflow: the read-only Driver invocation is starting.
+   * `target` is the runtime/model the Driver actually ran under.
    */
-  driverStarted?(): void;
+  driverStarted?(target?: ExecutionTarget): void;
+  /** Quality workflow: the writable Worker invocation is starting. */
+  workerStarted?(target: ExecutionTarget): void;
   /** Quality workflow: the Driver produced a parsed decision. */
   driverDecision?(decision: DriverDecisionRecord): void;
   /**
@@ -199,11 +202,11 @@ export interface RunObserver {
   /** Verification failed and the single correction attempt is starting. */
   correctionStarted?(failedCommands: string[]): void;
   /** Lot 7: the independent reviewer is starting. */
-  reviewStarted?(): void;
+  reviewStarted?(target?: ExecutionTarget): void;
   /** Lot 7: reviewer done (possibly with an advisory error). */
   reviewFinished?(review: RunReview): void;
   /** Lot 4: the post-run Observer is starting. */
-  observerStarted?(): void;
+  observerStarted?(target?: ExecutionTarget): void;
 }
 
 export interface RunTaskDeps {

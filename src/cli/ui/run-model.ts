@@ -1,4 +1,11 @@
-import type { DriverDecisionRecord, Run, RunReview, RunState, Task } from "../../core/index.js";
+import type {
+  DriverDecisionRecord,
+  ExecutionTarget,
+  Run,
+  RunReview,
+  RunState,
+  Task,
+} from "../../core/index.js";
 import { findingsSummary, formatDuration } from "../format.js";
 import type { CommandResult, VerificationCommand } from "../../verification/index.js";
 import type { RunTaskResult } from "../run-command.js";
@@ -46,11 +53,21 @@ export interface ChecklistStep {
   decision?: StepDecision;
   /** Latest live activity shown while the step is active. */
   activity?: string;
+  /** The runtime/model this step actually ran under (per-invocation, not global). */
+  target?: ExecutionTarget;
+  /**
+   * Bounded, persisted summary of significant activity (edited files, notable
+   * commands). Shown even after the step completes so the user keeps seeing
+   * what the agent did — without exposing private reasoning.
+   */
+  notes?: string[];
 }
 
 /** Ring-buffer cap so a long run cannot grow memory without bound. */
 export const MAX_OUTPUT_LINES = 2_000;
 const STDERR_TAIL_LINES = 5;
+/** Bounded count of notable-activity notes persisted per step. */
+const MAX_STEP_NOTES = 3;
 
 /**
  * Plain-TS view model for the run TUI. The CLI flow writes into it through the
@@ -72,9 +89,6 @@ export class RunModel {
   finalState: RunState | "setup-error" | undefined;
   final: RunTaskResult | undefined;
 
-  /** Friendly runtime/model label, e.g. "OpenCode / DeepSeek V4 Flash". */
-  runtimeLabel = "";
-
   /** Branch abbreviated to its short id, e.g. "conjunction/6b882b8e". */
   shortBranch = "";
 
@@ -88,6 +102,9 @@ export class RunModel {
   #workerStepCount = 0;
   #currentWorkerStepId = "";
   #nextVerificationIsFinal = false;
+
+  /** Bounded notable-activity notes per step, so history survives completion. */
+  #notes = new Map<string, Set<string>>();
 
   /** Pre-seeded by the caller from the configured verify commands. */
   verifyItems: VerifyItem[] = [];
@@ -144,16 +161,13 @@ export class RunModel {
     this.storeDir = ctx.storeDir;
     this.briefPath = ctx.task.source?.kind === "file" ? ctx.task.source.path : "";
     this.workflow = ctx.run.workflow ?? "";
-    this.runtimeLabel = runtimeLabel(
-      ctx.run.target?.runtime ?? ctx.run.runtime,
-      ctx.run.target?.model,
-    );
     this.shortBranch = shortBranch(ctx.run.branch ?? "");
     this.phase = "agent";
 
     this.#completeStep("workspace", `isolated · ${this.shortBranch}`);
     if (this.workflow !== "quality") {
-      this.#startStep({ id: "agent-1", label: "Agent (attempt 1)" });
+      const target = ctx.run.target ?? { runtime: ctx.run.runtime };
+      this.#startStep({ id: "agent-1", label: "Agent (attempt 1)", target });
     }
     this.#emit();
   }
@@ -245,9 +259,9 @@ export class RunModel {
   }
 
   /** Lot 7: the independent reviewer is starting. */
-  startReview(): void {
+  startReview(target?: ExecutionTarget): void {
     this.phase = "review";
-    this.#startStep({ id: "review", label: "Review" });
+    this.#startStep({ id: "review", label: "Review", ...(target !== undefined ? { target } : {}) });
     this.#emit();
   }
 
@@ -263,13 +277,13 @@ export class RunModel {
   }
 
   /** Quality workflow: the Driver invocation is starting. */
-  driverStarted(): void {
+  driverStarted(target?: ExecutionTarget): void {
     this.phase = "agent";
     if (this.#currentWorkerStepId.length > 0) {
       this.#completeStep(this.#currentWorkerStepId);
       this.#currentWorkerStepId = "";
     }
-    this.#startQualityDriver();
+    this.#startQualityDriver(target);
     this.#emit();
   }
 
@@ -307,6 +321,12 @@ export class RunModel {
     this.#emit();
   }
 
+  /** Quality workflow: the Worker invocation is starting under the given target. */
+  workerStarted(target: ExecutionTarget): void {
+    this.#setStepTarget(this.#currentWorkerStepId, target);
+    this.#emit();
+  }
+
   /** Quality workflow: a Driver decision was refused and the Driver re-invoked. */
   driverDecisionRefused(decision: DriverDecisionRecord, refusalReason: string): void {
     // The decision was already recorded; find the most recent Driver step and
@@ -331,7 +351,44 @@ export class RunModel {
     }
     const detail = activity.detail !== undefined ? ` ${activity.detail}` : "";
     step.activity = `${activity.label}${detail}`;
+    this.#recordNote(step.id, activity);
     this.#emit();
+  }
+
+  /** Persist a bounded, significant fact (edited file / notable command) for the step. */
+  #recordNote(stepId: string, activity: { kind: string; label: string; detail?: string }): void {
+    if (activity.detail === undefined || activity.detail.length === 0) {
+      return;
+    }
+    let note: string | undefined;
+    if (activity.kind === "editing") {
+      note = `✎ ${activity.detail}`;
+    } else if (activity.kind === "command") {
+      note = `⛭ ${activity.detail}`;
+    }
+    if (note === undefined) {
+      return;
+    }
+    let set = this.#notes.get(stepId);
+    if (set === undefined) {
+      set = new Set();
+      this.#notes.set(stepId, set);
+    }
+    if (set.has(note)) {
+      return;
+    }
+    set.add(note);
+    if (set.size > MAX_STEP_NOTES) {
+      // drop the oldest kept note to stay bounded
+      const first = set.values().next().value;
+      if (first !== undefined) {
+        set.delete(first);
+      }
+    }
+    const step = this.steps.find((candidate) => candidate.id === stepId);
+    if (step !== undefined) {
+      step.notes = [...set];
+    }
   }
 
   /** Quality workflow: a Worker invocation finished. */
@@ -363,9 +420,13 @@ export class RunModel {
   }
 
   /** Lot 4: the post-run Observer is starting. */
-  observerStarted(): void {
+  observerStarted(target?: ExecutionTarget): void {
     this.phase = "done";
-    this.#startStep({ id: "observer", label: "Observer" });
+    this.#startStep({
+      id: "observer",
+      label: "Observer",
+      ...(target !== undefined ? { target } : {}),
+    });
     this.#emit();
   }
 
@@ -448,9 +509,16 @@ export class RunModel {
     this.#emit();
   }
 
-  #startStep(step: { id: string; label: string }): void {
+  #startStep(step: { id: string; label: string; target?: ExecutionTarget }): void {
     this.steps.push({ ...step, status: "active", startedAt: Date.now() });
     this.#stepStartedAt.set(step.id, Date.now());
+  }
+
+  #setStepTarget(id: string, target: ExecutionTarget | undefined): void {
+    const step = this.steps.find((candidate) => candidate.id === id);
+    if (step !== undefined && target !== undefined) {
+      step.target = target;
+    }
   }
 
   #setDecision(id: string, decision: DriverDecisionRecord): void {
@@ -466,11 +534,12 @@ export class RunModel {
     };
   }
 
-  #startQualityDriver(): void {
+  #startQualityDriver(target?: ExecutionTarget): void {
     this.#driverStepCount++;
     this.#startStep({
       id: `driver-${this.#driverStepCount}`,
       label: `Driver #${this.#driverStepCount}`,
+      ...(target !== undefined ? { target } : {}),
     });
   }
 
@@ -515,7 +584,12 @@ export class RunModel {
 }
 
 /** "OpenCode / DeepSeek V4 Flash" from a target; graceful when model is absent. */
-function runtimeLabel(runtime: string, model: string | undefined): string {
+export function runtimeLabel(target: ExecutionTarget | undefined): string {
+  const runtime = target?.runtime ?? "";
+  const model = target?.model;
+  if (runtime.length === 0) {
+    return "";
+  }
   if (model === undefined || model === "") {
     return runtime;
   }

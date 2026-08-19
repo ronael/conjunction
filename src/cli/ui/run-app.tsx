@@ -5,6 +5,7 @@ import type { ReviewFinding } from "../../core/index.js";
 import { findingsSummary } from "../format.js";
 
 import type { ChecklistStep, RunModel, StepDecision, VerifyItem } from "./run-model.js";
+import { runtimeLabel } from "./run-model.js";
 
 // Single-width quarter-turn frames: stable width, no character shifting the
 // following text between ticks. Only the active step uses it.
@@ -18,16 +19,6 @@ function formatElapsed(startedAt: number, now: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-/** Dim key, bright value — the key-value row. */
-function Kv({ k, v }: { k: string; v: React.ReactNode }): React.JSX.Element {
-  return (
-    <Text wrap="wrap">
-      <Text dimColor>{k.padEnd(10)}</Text>
-      {v}
-    </Text>
-  );
 }
 
 function StepIcon({ status, spinner }: { status: ChecklistStep["status"]; spinner: string }) {
@@ -66,6 +57,9 @@ function DecisionLines({ decision }: { decision: StepDecision }): React.JSX.Elem
     decision.action === "delegate" && decision.target !== undefined
       ? `→ ${verb} · ${decision.target}`
       : `→ ${verb}`;
+  // delegate → objective is the useful signal; verify/accept/stop → reason.
+  const body =
+    decision.action === "delegate" ? (decision.objective ?? decision.reason) : decision.reason;
   return (
     <Box flexDirection="column" marginLeft={3}>
       <Text wrap="wrap">{first}</Text>
@@ -75,13 +69,8 @@ function DecisionLines({ decision }: { decision: StepDecision }): React.JSX.Elem
         </Text>
       )}
       <Text dimColor wrap="wrap">
-        {decision.reason}
+        {body}
       </Text>
-      {decision.objective !== undefined && (
-        <Text dimColor wrap="wrap">
-          {decision.objective}
-        </Text>
-      )}
     </Box>
   );
 }
@@ -90,18 +79,15 @@ function StepRow({
   step,
   spinner,
   width,
-  runtimeLabel,
   now,
 }: {
   step: ChecklistStep;
   spinner: string;
   width: number;
-  runtimeLabel: string;
   now: number;
 }) {
-  const isQuality = step.id.startsWith("driver-") || step.id.startsWith("worker-");
-  const label =
-    isQuality && runtimeLabel.length > 0 ? `${step.label} · ${runtimeLabel}` : step.label;
+  const targetLabel = runtimeLabel(step.target);
+  const label = targetLabel.length > 0 ? `${step.label} · ${targetLabel}` : step.label;
   const detail =
     step.status === "active" && step.startedAt !== undefined
       ? formatElapsed(step.startedAt, now)
@@ -165,21 +151,27 @@ function StepBlock({
   step,
   spinner,
   width,
-  runtimeLabel,
   verifyItems,
   now,
 }: {
   step: ChecklistStep;
   spinner: string;
   width: number;
-  runtimeLabel: string;
   verifyItems: VerifyItem[];
   now: number;
 }) {
   return (
     <Box flexDirection="column">
-      <StepRow step={step} spinner={spinner} width={width} runtimeLabel={runtimeLabel} now={now} />
+      <StepRow step={step} spinner={spinner} width={width} now={now} />
       {step.decision !== undefined && <DecisionLines decision={step.decision} />}
+      {/* persisted, bounded activity summary — visible even after the step completes */}
+      {step.notes !== undefined &&
+        step.notes.map((note) => (
+          <Text key={note} dimColor wrap="wrap">
+            {"  "}
+            {note}
+          </Text>
+        ))}
       {step.status === "active" && step.activity !== undefined && (
         <Text dimColor wrap="wrap">
           {"  "}◌ {step.activity}
@@ -204,71 +196,111 @@ function SeverityTag({ severity }: { severity: ReviewFinding["severity"] }) {
 
 const MAX_RENDERED_FINDINGS = 5;
 
+function changesSummary(model: RunModel): string {
+  const run = model.final?.run;
+  if (run === undefined) {
+    return "";
+  }
+  const changedWorkers =
+    (run.invocations ?? []).filter(
+      (invocation) => invocation.role === "worker" && invocation.workspaceChange?.changed,
+    ).length ?? 0;
+  return changedWorkers > 0
+    ? `${changedWorkers} worker change${changedWorkers === 1 ? "" : "s"} · isolated`
+    : "No changes";
+}
+
 function FinalBox({ model, width }: { model: RunModel; width: number }) {
   const result = model.final;
   const state = model.finalState ?? "setup-error";
   const stateNode =
     state === "completed" ? (
-      <Text color="green">✓ COMPLETED</Text>
+      <Text color="green">✓ Completed</Text>
     ) : state === "cancelled" ? (
-      <Text color="yellow">■ CANCELLED</Text>
+      <Text color="yellow">■ Cancelled</Text>
     ) : (
-      <Text color="red">✗ FAILED</Text>
+      <Text color="red">✗ Failed</Text>
     );
+
+  const verification = result?.verification;
+  const review = result?.run?.review;
 
   return (
     <Box flexDirection="column" width={width}>
-      <Kv k="State" v={stateNode} />
+      <Text dimColor>{"─".repeat(width)}</Text>
+      <Text bold>{stateNode}</Text>
+      <Text> </Text>
+
+      {state === "failed" && result?.run?.result?.error !== undefined && (
+        <>
+          <Text bold>Error</Text>
+          <Text color="red" wrap="wrap">
+            {result.run.result.error}
+          </Text>
+          <Text> </Text>
+        </>
+      )}
+
+      {verification !== undefined && (
+        <>
+          <Text bold>Verification</Text>
+          {verification.results.length === 0 ? (
+            <Text dimColor>no verification commands configured</Text>
+          ) : (
+            verification.results.map((r) => (
+              <Text key={r.name} wrap="wrap">
+                {"  "}
+                {r.timedOut || r.exitCode !== 0 ? (
+                  <Text color="red">✗</Text>
+                ) : (
+                  <Text color="green">✓</Text>
+                )}{" "}
+                {r.name}
+              </Text>
+            ))
+          )}
+          <Text> </Text>
+        </>
+      )}
+
+      {review !== undefined && (
+        <>
+          <Text bold>Review</Text>
+          {review.error !== undefined ? (
+            <Text dimColor>unavailable (advisory) · {review.error}</Text>
+          ) : review.findings.length === 0 ? (
+            <Text color="green">✓ No findings</Text>
+          ) : (
+            <>
+              <Text wrap="wrap">{findingsSummary(review.findings)}</Text>
+              {review.findings.slice(0, MAX_RENDERED_FINDINGS).map((finding, index) => (
+                <Text key={index} wrap="wrap">
+                  {"  "}• <SeverityTag severity={finding.severity} />{" "}
+                  {finding.path !== undefined ? `${finding.path}: ` : ""}
+                  {finding.message}
+                </Text>
+              ))}
+              {review.findings.length > MAX_RENDERED_FINDINGS && (
+                <Text dimColor>
+                  {"  "}… +{review.findings.length - MAX_RENDERED_FINDINGS} more in the run JSON
+                </Text>
+              )}
+            </>
+          )}
+          <Text> </Text>
+        </>
+      )}
+
+      <Text bold>Changes</Text>
+      <Text wrap="wrap">{changesSummary(model)}</Text>
+      <Text> </Text>
+
       {state === "completed" && model.final?.run?.id !== undefined && (
-        <Kv k="Next" v={<Text>conjunction land {model.final.run.id}</Text>} />
+        <>
+          <Text bold>Next</Text>
+          <Text wrap="wrap">conjunction land {model.final.run.id}</Text>
+        </>
       )}
-      {result?.run !== undefined && result.run.attempts.length > 0 && (
-        <Kv
-          k="Attempts"
-          v={`${result.run.attempts.length}${result.run.attempts.length > 1 ? " (initial + correction)" : ""}`}
-        />
-      )}
-      {result?.run?.branch !== undefined && <Kv k="Branch" v={result.run.branch} />}
-      {result?.run?.workspacePath !== undefined && <Kv k="Worktree" v={result.run.workspacePath} />}
-      {result?.run?.result?.error !== undefined && (
-        <Kv k="Error" v={<Text color="red">{result.run.result.error}</Text>} />
-      )}
-      {result?.verification !== undefined &&
-        (result.verification.results.length === 0 ? (
-          <Kv k="Verify" v={<Text dimColor>no verification commands configured</Text>} />
-        ) : (
-          <Kv
-            k="Verify"
-            v={`${result.verification.passed ? "passed" : "FAILED"} (${result.verification.results
-              .map((r) => `${r.name} ${r.timedOut ? "timeout" : r.exitCode === 0 ? "✓" : "✗"}`)
-              .join(", ")})`}
-          />
-        ))}
-      {result !== undefined && result.run !== undefined && (
-        <Kv k="Metadata" v={`${result.storeDir}/${result.run.id}.json`} />
-      )}
-      {result?.run?.review !== undefined &&
-        (result.run.review.error !== undefined ? (
-          <Kv k="Review" v={<Text dimColor>unavailable (advisory)</Text>} />
-        ) : (
-          <>
-            <Kv k="Review" v={findingsSummary(result.run.review.findings)} />
-            {result.run.review.findings.slice(0, MAX_RENDERED_FINDINGS).map((finding, index) => (
-              <Text key={index} wrap="wrap">
-                {"  "}• <SeverityTag severity={finding.severity} />{" "}
-                {finding.path !== undefined ? `${finding.path}: ` : ""}
-                {finding.message}
-              </Text>
-            ))}
-            {result.run.review.findings.length > MAX_RENDERED_FINDINGS && (
-              <Text dimColor>
-                {"  "}… +{result.run.review.findings.length - MAX_RENDERED_FINDINGS} more in the run
-                JSON
-              </Text>
-            )}
-          </>
-        ))}
-      {result?.cleanupNote !== undefined && <Kv k="Cleanup" v={result.cleanupNote} />}
     </Box>
   );
 }
@@ -353,7 +385,6 @@ export function RunApp({
           step={step}
           spinner={spinner}
           width={contentWidth}
-          runtimeLabel={model.runtimeLabel}
           verifyItems={step.id === model.currentVerifyStepId ? model.verifyItems : []}
           now={now}
         />

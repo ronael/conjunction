@@ -393,6 +393,15 @@ This pass adds one real workflow, `quality`, without changing the lifecycle of
   the TUI. The OpenCode adapter subscribes to its official event stream
   (`session.next.*`, `session.idle`, …) and maps a curated subset to activity —
   never chain-of-thought, reasoning deltas, or provider envelopes.
+- **Per-step runtime in the TUI:** each checklist step carries the actual
+  `ExecutionTarget` of its invocation (`driverStarted`/`workerStarted`/
+  `startReview`/`observerStarted` observer callbacks), so a mixed run
+  (`Driver: Claude`, `Worker: OpenCode`, `Critic: Codex`) renders each role
+  under its own runtime/model instead of a single global label. Worker steps
+  persist a bounded set of notable activity notes (edited files, commands) so
+  the user keeps seeing what an agent did after it finishes, and the final
+  panel keeps to progressive disclosure (state, verification, review, changes,
+  next) with technical fields (branch/worktree/metadata) out of the normal view.
 - **Final critic:** after Driver accept, `quality` runs one final deterministic
   verification through the existing terminal path and then the independent
   read-only critic. The critic target can differ from both Driver and workers.

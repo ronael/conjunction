@@ -143,7 +143,7 @@ export async function runQualityTask(
       });
 
       out("\n-- driver --\n");
-      observer?.driverStarted?.();
+      observer?.driverStarted?.(driverTarget);
       const lastWorker = lastWritableInvocation(run);
       const driverInvoke = await orchestrator.invokeAgent(run.id, {
         role: "driver",
@@ -224,7 +224,7 @@ export async function runQualityTask(
           }
 
           out("\n-- review --\n");
-          observer?.reviewStarted?.();
+          observer?.reviewStarted?.(criticTarget);
           const reviewDiff = await getDiff(run);
           const packet = buildReviewerPacket({
             task,
@@ -299,6 +299,7 @@ export async function runQualityTask(
         out("\n-- worker --\n");
         let workerInvoke: Awaited<ReturnType<Orchestrator["invokeAgent"]>> | undefined;
         try {
+          observer?.workerStarted?.(selectedTarget.target);
           workerInvoke = await orchestrator.invokeAgent(run.id, {
             role: "worker",
             instructions: workerPacket,
@@ -358,7 +359,7 @@ export async function runQualityTask(
     runHasMeaningfulExecution(run);
   if (observerUseful) {
     out("\n-- observer --\n");
-    observer?.observerStarted?.();
+    observer?.observerStarted?.(observerTarget);
     try {
       await orchestrator.observeRun(run.id, {
         timeoutMs: options.timeoutMinutes * 60_000,

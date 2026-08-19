@@ -163,7 +163,7 @@ describe("RunApp", () => {
     unmount();
   });
 
-  it("renders the COMPLETED final box with state, verify recap and metadata", async () => {
+  it("renders the COMPLETED final panel: state, verification, changes, next — without technical fields", async () => {
     const model = runningModel();
     model.finish(finalResult("completed"));
     const { lastFrame, unmount } = render(
@@ -172,18 +172,23 @@ describe("RunApp", () => {
     await flush();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("✓ COMPLETED");
-    expect(frame).toContain("State");
-    expect(frame).toContain("conjunction/a1b2c3d4");
-    expect(frame).toContain("/tmp/repo/.conjunction/worktrees/a1b2c3d4");
-    expect(frame).toContain("passed (typecheck ✓)");
-    expect(frame).toContain("/tmp/repo/.conjunction/runs/a1b2c3d4-full-run-id.json");
-    expect(frame).toContain("worktree preserved for inspection");
+    expect(frame).toContain("✓ Completed");
+    // clean progressive-disclosure sections
+    expect(frame).toContain("Verification");
+    expect(frame).toContain("✓ typecheck");
+    expect(frame).toContain("Changes");
+    expect(frame).toContain("No changes");
+    expect(frame).toContain("Next");
+    expect(frame).toContain("conjunction land a1b2c3d4-full-run-id");
     expect(frame).toContain("q / enter: exit");
+    // technical detail is out of the normal view (progressive disclosure)
+    expect(frame).not.toContain("Worktree");
+    expect(frame).not.toContain("Metadata");
+    expect(frame).not.toContain("worktree preserved");
     unmount();
   });
 
-  it("renders FAILED and CANCELLED final boxes", async () => {
+  it("renders FAILED and CANCELLED final panels", async () => {
     const failed = runningModel();
     const failedResult = finalResult("failed");
     failedResult.run = { ...failedResult.run!, result: { error: "verification failed: test" } };
@@ -193,7 +198,7 @@ describe("RunApp", () => {
     );
     await flush();
     const failedFrame = failedRender.lastFrame() ?? "";
-    expect(failedFrame).toContain("✗ FAILED");
+    expect(failedFrame).toContain("✗ Failed");
     expect(failedFrame).toContain("verification failed: test");
     failedRender.unmount();
 
@@ -203,7 +208,7 @@ describe("RunApp", () => {
       <RunApp model={cancelled} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
-    expect(cancelledRender.lastFrame() ?? "").toContain("■ CANCELLED");
+    expect(cancelledRender.lastFrame() ?? "").toContain("■ Cancelled");
     cancelledRender.unmount();
   });
 
@@ -309,7 +314,7 @@ describe("RunApp", () => {
     unmount();
   });
 
-  it("final box notes how many attempts ran", async () => {
+  it("final panel keeps the clean summary even when attempts/corrections ran", async () => {
     const model = runningModel();
     const result = finalResult("completed");
     result.run = {
@@ -324,7 +329,11 @@ describe("RunApp", () => {
       <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
     );
     await flush();
-    expect(lastFrame() ?? "").toContain("2 (initial + correction)");
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("✓ Completed");
+    expect(frame).toContain("Changes");
+    // raw attempt-count detail is not pushed into the normal view
+    expect(frame).not.toContain("(initial + correction)");
     unmount();
   });
 
@@ -403,27 +412,28 @@ describe("RunApp", () => {
     return model;
   }
 
-  it("renders a Driver delegate decision with reason and bounded objective", async () => {
+  it("renders a Driver delegate decision: objective is shown, verbose reason is not", async () => {
     const model = qualityModel();
-    model.driverStarted();
+    model.driverStarted({ runtime: "claude", model: "claude/sonnet" });
     model.driverDecision({
       id: "d1",
       invocationId: "i1",
       createdAt: "t",
       action: "delegate",
       targetId: "worker",
-      objective: "Implement the requested file.",
-      reason: "The requested file does not exist yet.",
+      objective: "Create ui-test.txt containing exactly TUI_OK.",
+      reason: "First step: no work has been done yet. Delegate the bounded write task.",
     } as never);
     const { lastFrame, unmount } = render(
       <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
     );
     await flush();
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Driver #1 · opencode / deepseek-v4-flash-free");
+    expect(frame).toContain("Driver #1 · claude / sonnet");
     expect(frame).toContain("→ Delegate · worker");
-    expect(frame).toContain("The requested file does not exist yet.");
-    expect(frame).toContain("Implement the requested file.");
+    expect(frame).toContain("Create ui-test.txt containing exactly TUI_OK.");
+    // delegate keeps the UI quiet: the reason stays persisted, not rendered
+    expect(frame).not.toContain("First step: no work has been done yet.");
     unmount();
   });
 
@@ -465,7 +475,7 @@ describe("RunApp", () => {
     unmount();
   });
 
-  it("shows live Worker activity under the active step", async () => {
+  it("shows live Worker activity and persists a bounded summary after completion", async () => {
     const model = qualityModel();
     model.driverStarted();
     model.driverDecision({
@@ -477,14 +487,64 @@ describe("RunApp", () => {
       objective: "create the file",
       reason: "go",
     } as never);
+    model.workerStarted({ runtime: "opencode", model: "opencode/deepseek-v4-flash-free" });
     model.agentActivity({ kind: "editing", label: "Editing", detail: "ui-test.txt" });
+    {
+      const { lastFrame, unmount } = render(
+        <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
+      );
+      await flush();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Editing ui-test.txt");
+      expect(frame).toContain("Worker #1 · opencode / deepseek-v4-flash-free");
+      unmount();
+    }
+    // once done, the bounded note survives so the user still sees what it did
+    model.workerFinished("completed");
     const { lastFrame, unmount } = render(
       <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={60} />,
     );
     await flush();
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Editing ui-test.txt");
+    expect(frame).toContain("✎ ui-test.txt");
+    unmount();
+  });
+
+  it("renders each role under its own runtime/model (multi-runtime regression)", async () => {
+    const model = qualityModel();
+    // Driver: Claude
+    model.driverStarted({ runtime: "claude", model: "claude/sonnet" });
+    model.driverDecision({
+      id: "d1",
+      invocationId: "i1",
+      createdAt: "t",
+      action: "delegate",
+      targetId: "worker",
+      objective: "make it",
+      reason: "go",
+    } as never);
+    // Worker: OpenCode
+    model.workerStarted({ runtime: "opencode", model: "opencode/deepseek-v4-flash-free" });
+    model.workerFinished("completed");
+    // Critic: Codex
+    model.driverStarted({ runtime: "claude", model: "claude/sonnet" });
+    model.driverDecision({
+      id: "d2",
+      invocationId: "i2",
+      createdAt: "t",
+      action: "accept",
+      reason: "green",
+    } as never);
+    model.startReview({ runtime: "codex", model: "codex/gpt-5" });
+    const { lastFrame, unmount } = render(
+      <RunApp model={model} onCancel={noop} onQuit={noop} viewportHeight={6} width={64} />,
+    );
+    await flush();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Driver #1 · claude / sonnet");
     expect(frame).toContain("Worker #1 · opencode / deepseek-v4-flash-free");
+    expect(frame).toContain("Driver #2 · claude / sonnet");
+    expect(frame).toContain("Review · codex / gpt-5");
     unmount();
   });
 
@@ -538,9 +598,9 @@ describe("RunApp", () => {
       const frame = lastFrame() ?? "";
       expect(frame).not.toMatch(/^[◐◓◑◒] /m);
       if (state === "failed") {
-        expect(frame).toContain("✗ FAILED");
+        expect(frame).toContain("✗ Failed");
       } else {
-        expect(frame).toContain("■ CANCELLED");
+        expect(frame).toContain("■ Cancelled");
       }
       unmount();
     }
