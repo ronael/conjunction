@@ -315,6 +315,11 @@ export interface RunAppProps {
   viewportHeight?: number;
   /** Content width; defaults to terminal columns (capped). */
   width?: number;
+  /**
+   * When false (product flow), the final panel is suppressed because a
+   * downstream Result Actions view takes over instead of "q / enter: exit".
+   */
+  showFinalPanel?: boolean;
 }
 
 export function RunApp({
@@ -323,6 +328,7 @@ export function RunApp({
   onQuit,
   viewportHeight,
   width,
+  showFinalPanel = true,
 }: RunAppProps): React.JSX.Element {
   useSyncExternalStore(model.subscribe, model.getVersion);
   const [tick, setTick] = useState(0);
@@ -408,10 +414,12 @@ export function RunApp({
         </Box>
       )}
       <Text> </Text>
-      {done && <FinalBox model={model} width={contentWidth} />}
+      {done && showFinalPanel && <FinalBox model={model} width={contentWidth} />}
       <Text dimColor>
         {done
-          ? "q / enter: exit"
+          ? showFinalPanel
+            ? "q / enter: exit"
+            : " "
           : `elapsed ${formatElapsed(model.startedAt, now)} · q / Ctrl-C: cancel · ↑/↓: scroll`}
       </Text>
     </Box>

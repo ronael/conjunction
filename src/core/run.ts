@@ -216,6 +216,11 @@ export interface Run {
   baseCommit?: string;
   /** Set by `conjunction land` after a successful landing. */
   landed?: LandedRecord;
+  /**
+   * Minimal annotation (not a lifecycle state) recording that the run's
+   * isolated workspace was explicitly discarded via the Result Actions.
+   */
+  discardedAt?: string;
 }
 
 /**

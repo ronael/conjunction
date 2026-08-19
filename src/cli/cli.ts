@@ -300,6 +300,13 @@ export async function cli(argv: string[], deps: CliDeps = {}): Promise<number> {
         out(USAGE);
         return 0;
       case undefined:
+        // No command: launch the interactive Run Composer when a terminal is
+        // available; otherwise fall back to the plain usage text (CI/scripts).
+        if (deps.out === undefined && process.stdout.isTTY === true) {
+          const registry = resolveRuntimeRegistry(deps, false);
+          const { runProduct } = await import("./product/product-run.js");
+          return await runProduct(registry);
+        }
         out(USAGE);
         return 2;
       default:

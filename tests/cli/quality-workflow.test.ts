@@ -239,6 +239,11 @@ describe("quality workflow", () => {
     expect(scenario.run.review?.structured).toBe(true);
     expect(scenario.run.result?.summary).toContain("driver accepted");
     expect(scenario.run.verificationHistory).toHaveLength(2);
+    // worker, driver and critic all forward live activity to the observer
+    const workerInput = scenario.workerInputs.worker?.[0];
+    expect(typeof workerInput?.onActivity).toBe("function");
+    expect(typeof scenario.driverInputs[0]?.onActivity).toBe("function");
+    expect(typeof scenario.criticInputs[0]?.onActivity).toBe("function");
   });
 
   it("does not confuse worker runtime supportsReadOnly with an effective read-only worker permission", async () => {

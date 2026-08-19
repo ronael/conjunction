@@ -534,3 +534,39 @@ Rationale:
 - **Start with plain `execFile`/spawn, not a PTY.** Per `05-DECISIONS.md`, PTY only
   when an interactive CLI empirically requires it; the contract above works either
   way.
+
+## V1 CLI productization — Run Composer & Result Actions
+
+This pass turns the flag-driven CLI into a product UX without touching the engine:
+
+- **Entrypoint:** `conjunction` (no args) opens the interactive Run Composer on a
+  TTY; `--help`, `run`, `land`, `report`, `status` and all scriptable forms are
+  unchanged. On a non-TTY it falls back to plain usage instead of forcing Ink.
+- **Composer (plain TS controller + Ink renderer):** `ComposerModel` owns task,
+  workflow, agents (Driver/Worker/Review), verification and summary state; React
+  only renders and routes keys. There is no second business state machine — once
+  Run is chosen, `ProductController` calls the SAME `runTask` engine the CLI uses
+  (no shelling out to itself) and hands the shared `RunModel` to the existing
+  Execution TUI (`RunApp`).
+- **Runtime discovery:** nothing is hardcoded in React. `RuntimeCatalog` builds
+  descriptors from the `RuntimeRegistry` (capabilities + availability), and role
+  compatibility (read-only + structured output for Driver/Review) filters what is
+  offered. Models are discovered dynamically for OpenCode (`opencode models`); a
+  runtime that cannot list models offers "Runtime default" + "Custom model…"
+  instead of a fake hardcoded list. Free models are pre-selected on first launch —
+  never a silent paid choice.
+- **ConfigStore:** minimal persisted last-config at
+  `$XDG_CONFIG_HOME/conjunction/config.json` (fallback `~/.config/conjunction/`),
+  injectable and versioned. A stored config that references a now-unavailable
+  runtime is detected as invalid and re-picked rather than crashing.
+- **Result Actions:** after a run, the Execution TUI hands off to
+  `ResultActionsModel`, which reads the real Run and drives the same services as
+  the CLI: Apply = `landRun` + cleanup (reuses `assertLandPreflight`/
+  `generateLandingPatchToFile`/`checkPatchApplies`/`applyPatch`/`removeRunWorkspace`);
+  View diff uses the landing patch (same source land applies); View report reuses
+  `buildRunReport`/`formatRunReport`; Discard is a guarded `removeRunWorkspace`
+  that only ever touches `conjunction/<runId>` and the run's own worktree path,
+  recording a minimal `run.discarded` annotation + event.
+- **Progressive disclosure:** normal views show roles/runtime/model/verification/
+  decisions/result; run ids, worktree/metadata paths, cleanup and patch paths stay
+  out of the normal flow (available via `conjunction land` / `conjunction report`).

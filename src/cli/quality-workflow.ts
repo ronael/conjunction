@@ -314,6 +314,7 @@ export async function runQualityTask(
               observer?.agentOutput?.(chunk, stream);
               out(chunk);
             },
+            onActivity: (activity) => observer?.agentActivity?.(activity),
           });
           const afterWorkerDiff = await getDiff(run);
           recordWorkspaceChange(workerInvoke.invocation, workerDiff, afterWorkerDiff);

@@ -144,6 +144,10 @@ export interface RunLandedEvent
     EventBase<"run.landed", { targetBranch: string; targetCommit: string; patchPath: string }>,
     RunScoped {}
 
+/** Emitted when a run's isolated workspace is explicitly discarded. */
+export interface RunDiscardedEvent
+  extends EventBase<"run.discarded", { discardedAt: string }>, RunScoped {}
+
 export type ConjunctionEvent =
   | TaskCreatedEvent
   | RunStartedEvent
@@ -169,7 +173,8 @@ export type ConjunctionEvent =
   | CorrectionCompletedEvent
   | ReviewStartedEvent
   | ReviewCompletedEvent
-  | RunLandedEvent;
+  | RunLandedEvent
+  | RunDiscardedEvent;
 
 export type ConjunctionEventType = ConjunctionEvent["type"];
 

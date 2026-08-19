@@ -114,6 +114,7 @@ export {
 } from "./review.js";
 export {
   EventStore,
+  type AgentActivityEvent,
   type AgentCompletedEvent,
   type AgentOutputEvent,
   type AgentStartedEvent,
@@ -122,6 +123,7 @@ export {
   type CorrectionCompletedEvent,
   type CorrectionStartedEvent,
   type DriverDecisionEvent,
+  type DriverDecisionRefusedEvent,
   type InvocationCancelledEvent,
   type InvocationCompletedEvent,
   type InvocationCreatedEvent,
@@ -130,6 +132,7 @@ export {
   type InvocationStartedEvent,
   type RunCancelledEvent,
   type RunCompletedEvent,
+  type RunDiscardedEvent,
   type RunFailedEvent,
   type RunStartedEvent,
   type RunLandedEvent,

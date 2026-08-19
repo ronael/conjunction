@@ -15,6 +15,28 @@ authenticated (`codex --version` should work). Claude Code is also supported as
 
 ## Commands
 
+### `conjunction` (no arguments) — interactive Run Composer
+
+On an interactive terminal, running `conjunction` with no arguments opens the
+Run Composer: write the task, pick the workflow, configure the Driver/Worker/
+Review runtimes and models, choose verification, review a summary, then run.
+After the run, the Result Actions let you Apply / View diff / View report /
+Keep isolated / Discard without remembering run ids, `land` or `--cleanup`.
+
+```text
+$ conjunction
+
+Conjunction
+────────────────────────────────
+What should Conjunction do?
+> Create a Todo API…
+```
+
+Your last configuration is remembered (in `~/.config/conjunction/config.json`,
+or `$XDG_CONFIG_HOME/conjunction/config.json`) and pre-selected on the next
+launch. In a pipe / CI / non-TTY environment, `conjunction` with no arguments
+falls back to the plain usage text instead of forcing an interactive UI.
+
 ### `conjunction doctor`
 
 Checks that an agent runtime is installed and usable:
